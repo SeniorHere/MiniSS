@@ -1,24 +1,25 @@
 <#
 .SYNOPSIS
-    MiniSS - Mini ScreenShare scanner
-    Author : Senior  (v2.0)
+    MiniSS - Mini ScreenShare scanner (v3.0)
+    Author : Senior
     Discord: https://discord.gg/95MmttMD6
 
 .DESCRIPTION
-    Looks for well-known Minecraft cheat / injector / macro strings in:
+    Looks for well-known Minecraft cheat clients / modules / injectors in:
       - files (.jar .exe .dll .bat .cmd)  - jar files are opened and checked inside
       - running processes
       - Prefetch + Recent traces (programs that ran before, even if deleted)
     Everything stays on this PC. Nothing is uploaded, deleted or changed.
-    Suspicious strings are shown in RED. A CSV + HTML report is saved on the Desktop.
+    Suspicious strings are shown in RED. Results are listed LOW > MEDIUM > HIGH.
+    A CSV + HTML report is saved on the Desktop.
 
 .PARAMETER Mode
-    Quick = your user profile (Desktop, Downloads, AppData\.minecraft ...)  [default]
+    Quick = Downloads, Desktop, Documents, AppData (.minecraft, launchers), Temp   [default, ~1-2 min]
     Full  = every fixed / removable drive (slower)
 .PARAMETER Path
     Scan only these folders (overrides Mode).
 .PARAMETER ShowWeak
-    Also list files that only match a single weak keyword.
+    Also list files that only match weak (ambiguous) keywords.
 .PARAMETER NoPause
     Do not wait for Enter at the end.
 
@@ -33,7 +34,7 @@ param(
     [string[]]$Path,
     [switch]$ShowWeak,
     [switch]$NoPause,
-    [int]$MaxSizeMB = 200,
+    [int]$MaxSizeMB = 60,
     [string]$OutDir = [Environment]::GetFolderPath('Desktop')
 )
 
@@ -45,6 +46,8 @@ $Invite = 'https://discord.gg/95MmttMD6'
 
 # ---------------------------------------------------------------------------
 # 1) Signature database   weight: 3 = strong, 2 = medium, 1 = weak (ambiguous)
+#    Generic names (Vape, Sigma, Flux ...) are only listed with a "Client"-style
+#    suffix so normal programs are not flagged.
 # ---------------------------------------------------------------------------
 $db = @{}
 function Add-Terms {
@@ -52,7 +55,7 @@ function Add-Terms {
     foreach ($t in $List) { $db[$t] = $Weight }
 }
 
-# Strong: combat / PvP cheat modules
+# Strong: cheat modules
 Add-Terms 3 @(
     'AutoTotem', 'InventoryTotem', 'InvTotem', 'AutoInventoryTotem', 'TotemHit',
     'AutoCrystal', 'CrystalAura', 'OneHitCrystal', 'CrystalOptimizer', 'FastCrystal', 'AutoHitCrystal',
@@ -62,29 +65,65 @@ Add-Terms 3 @(
     'InvMove', 'MaceDMG', 'MaceAura', 'AutoMace', 'NoFall', 'AutoWTap', 'ScaffoldWalk',
     'AutoCrit', 'PacketFly', 'AntiKnockback', 'NoKnockback'
 )
-# Strong: well-known cheat clients / loaders
+# Strong: cheat clients (distinctive names)
 Add-Terms 3 @(
-    'LiquidBounce', 'meteordevelopment', 'meteor-client', 'wurstclient', 'wurst-client',
-    'Aristois', 'RusherHack', 'ThunderHack', 'FutureClient', 'vape.gg', 'VapeV4', 'VapeLite',
-    'DoomsdayClient', 'NovolineClient', 'RiseClient', 'TenacityClient', 'AstolfoClient',
-    '3arthh4ck', 'SalHack', 'KamiBlue', 'BleachHack', 'ForgeHax'
+    'LiquidBounce', 'meteordevelopment', 'meteor-client', 'MeteorClient', 'Meteor Client',
+    'wurstclient', 'wurst-client', 'Wurst Client', 'BleachHack', 'Aristois', 'RusherHack', 'ThunderHack',
+    'FutureClient', 'Future Client', 'vape.gg', 'VapeV4', 'VapeV3', 'VapeLite', 'Vape Client',
+    'Vape V4', 'Vape V3', 'Vape Lite', 'RavenB+', 'Raven B+', 'RavenBPlus',
+    'SigmaClient', 'Sigma Client', 'Sigma5', 'Sigma 5.0',
+    'ImpactClient', 'Impact Client', 'JigsawClient', 'Jigsaw Client', 'AresClient', 'Ares Client',
+    'HydraClient', 'Hydra Client', 'XuluClient', 'Xulu Client', 'FluxClient', 'Flux Client',
+    'PerishClient', 'Perish Client', 'JexClient', 'Jex Client', 'FrostClient', 'Frost Client',
+    'ItamiClient', 'Itami Client', 'PolarClient', 'Polar Client', 'CurseClient', 'Curse Client',
+    'FDPClient', 'FDP Client', 'DopiumClient', 'Dopium Client', 'Dopium'
+)
+# Strong: more well-known cheat clients
+Add-Terms 3 @(
+    'RiseClient', 'Rise Client', 'NovolineClient', 'Novoline Client', 'TenacityClient', 'Tenacity Client',
+    'AstolfoClient', 'Astolfo Client', 'DoomsdayClient', 'Doomsday Client', 'SlinkyClient', 'Slinky Client',
+    'KonasClient', 'Konas Client', 'PhobosClient', 'Phobos Client', '3arthh4ck', 'SalHack', 'KamiBlue',
+    'ForgeHax', 'Pandaware', 'ExhibitionClient', 'Exhibition Client', 'EntropyClient', 'Entropy Client',
+    'DripClient', 'Drip Client', 'ZeroDay Client', 'ZerodayClient', 'WolframClient', 'Wolfram Client',
+    'InertiaClient', 'Inertia Client', 'NodusClient', 'CosmosClient', 'Cosmos Client',
+    'BozeClient', 'Boze Client', 'Nursultan', 'CelestialClient', 'Celestial Client',
+    'ExpensiveClient', 'Expensive Client', 'Wexside', 'Akrien', 'RemixClient', 'Remix Client',
+    'MoonClient', 'Moon Client', 'Huzuni', 'Lambda Client', 'lambda-client', 'gamesense.pub', 'GameSense Client'
 )
 # Medium
 Add-Terms 2 @(
     'ClickGUI', 'ReachHack', 'TinyTask', 'HitSelect', 'DoubleHand', 'NoSlowdown', 'ElytraFly',
-    'GameSense', 'Konas', 'Nodus', 'Pandaware', 'RavenB', 'GSAutoClicker', 'OPAutoClicker',
-    'SpeedAutoClicker', 'AutoTrap', 'HoleFiller', 'SelfFill', 'FastBreak'
+    'GSAutoClicker', 'OPAutoClicker', 'SpeedAutoClicker', 'AutoTrap', 'HoleFiller', 'SelfFill', 'FastBreak'
 )
-# Weak: common words that also appear in harmless files
+# Weak: common words that also appear in harmless files (never reported alone)
 Add-Terms 1 @(
-    'Flight', 'Macro', 'Velocity', 'XRay', 'FastPlace', 'Hitbox', 'Bhop', 'WallHack', 'Injector', 'Criticals', 'Backtrack',
-    'AutoHotkey', 'Surround', 'AutoArmor', 'FreeCam', 'Phobos', 'Slinky', 'Exhibition', 'Entropy'
+    'Flight', 'Macro', 'Velocity', 'XRay', 'FastPlace', 'Hitbox', 'Bhop', 'WallHack', 'Injector',
+    'Criticals', 'Backtrack', 'AutoHotkey', 'Surround', 'AutoArmor', 'FreeCam'
+)
+
+# Generic client names: matched in FILE NAMES only, and only together with a typical suffix
+# (e.g. "Vape V4.exe", "Sigma Client.jar", "Raven B+.jar", "Impact_loader.exe").
+$genericNames = 'vape|raven|sigma|rise|novoline|tenacity|astolfo|impact|jigsaw|ares|hydra|xulu|flux|perish|jex|frost|itami|polar|curse|fdp|dopium|slinky|doomsday|entropy|drip|exhibition|zeroday|wolfram|inertia|nursultan|celestial|expensive|wexside|akrien|moon|remix|huzuni'
+$nameRegex = New-Object System.Text.RegularExpressions.Regex(
+    ('(?i)(^|[^a-z0-9])(' + $genericNames + ')[ _\-.]*(client|loader|injector|crack(ed)?|hack(ed)?|cheat|ghost|lite|v\d+(\.\d+)*|b\+{1,2}|\d+(\.\d+)+)([^a-z0-9]|$)'))
+
+# Well-known harmless programs: skipped when they match only on content (not on their name)
+$trustedNameRegex = '(?i)^(tlauncher|whatsapp)'
+$trustedPublishers = @(
+    'Microsoft', 'Google', 'WhatsApp', 'Meta Platforms', 'Mozilla', 'Oracle', 'Adoptium', 'Eclipse',
+    'Discord', 'Valve', 'NVIDIA', 'Intel', 'Advanced Micro Devices', 'Mojang', 'Apple', 'Adobe',
+    'Epic Games', 'Spotify', 'Zoom', 'JetBrains', 'Logitech', 'Razer', 'Corsair', 'SteelSeries',
+    'Realtek', 'Python Software', 'GitHub', 'OBS Project', 'Brave', 'Opera', 'Telegram', 'Riot Games',
+    'Blizzard', 'Electronic Arts', 'Ubisoft', 'Amazon', 'Cloudflare', 'Autodesk', 'Dropbox'
 )
 
 $allTerms = [string[]]@($db.Keys)
 
 # ---------------------------------------------------------------------------
-# 2) Byte-level matching engine (compiled once; works on Windows PowerShell 5.1 and 7)
+# 2) Matching engine (compiled once; works on Windows PowerShell 5.1 and 7)
+#    - case-insensitive, ASCII + UTF-16 strings
+#    - word-boundary aware (so "NoFall" does not match "NoFallback")
+#    - multi-threaded
 # ---------------------------------------------------------------------------
 if (-not ('SigCore' -as [type])) {
     $csharp = @'
@@ -93,62 +132,104 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Text;
+using System.Threading.Tasks;
 
 public static class SigCore
 {
     static byte[][] pats = new byte[0][];
     static string[] tags = new string[0];
+    static bool[] wide = new bool[0];
     static List<int>[] byFirst = new List<int>[256];
+    static bool[] pairOk = new bool[65536];
+    static byte[] lower = MakeLower();
     static int longest = 1;
-    const int Chunk = 4 * 1024 * 1024;
+    const int Chunk = 2 * 1024 * 1024;
+    const long JarBudget = 48L * 1024 * 1024;
+
+    static byte[] MakeLower()
+    {
+        byte[] t = new byte[256];
+        for (int i = 0; i < 256; i++) t[i] = (byte)((i >= 65 && i <= 90) ? i + 32 : i);
+        return t;
+    }
 
     public static void Load(string[] terms)
     {
         var p = new List<byte[]>();
         var t = new List<string>();
+        var w = new List<bool>();
         byFirst = new List<int>[256];
+        pairOk = new bool[65536];
         longest = 1;
         foreach (string term in terms)
         {
+            if (string.IsNullOrEmpty(term) || term.Length < 3) continue;
             string low = term.ToLowerInvariant();
-            byte[] ascii = Encoding.ASCII.GetBytes(low);
-            byte[] wide = Encoding.Unicode.GetBytes(low);
-            foreach (byte[] b in new byte[][] { ascii, wide })
+            byte[] a = Encoding.ASCII.GetBytes(low);
+            byte[] u = Encoding.Unicode.GetBytes(low);
+            for (int pass = 0; pass < 2; pass++)
             {
+                byte[] b = (pass == 0) ? a : u;
                 p.Add(b);
                 t.Add(term);
+                w.Add(pass == 1);
                 int idx = p.Count - 1;
                 if (byFirst[b[0]] == null) byFirst[b[0]] = new List<int>();
                 byFirst[b[0]].Add(idx);
+                pairOk[(b[0] << 8) | b[1]] = true;
                 if (b.Length > longest) longest = b.Length;
             }
         }
         pats = p.ToArray();
         tags = t.ToArray();
+        wide = w.ToArray();
+    }
+
+    static bool IsLetter(byte b) { return (b >= 65 && b <= 90) || (b >= 97 && b <= 122); }
+    static bool IsLowerCase(byte b) { return b >= 97 && b <= 122; }
+
+    static bool Boundary(byte[] buf, int start, int plen, int len, int step)
+    {
+        bool firstUpper = buf[start] >= 65 && buf[start] <= 90;
+        int pi = start - step;
+        if (pi >= 0)
+        {
+            byte pb = buf[pi];
+            if (step == 2 && buf[pi + 1] != 0) pb = 0;
+            if (IsLetter(pb) && !firstUpper) return false;
+        }
+        int ni = start + plen;
+        if (ni + step <= len)
+        {
+            byte nb = buf[ni];
+            if (step == 2 && buf[ni + 1] != 0) nb = 0;
+            if (IsLowerCase(nb)) return false;
+        }
+        return true;
     }
 
     static void Scan(byte[] buf, int len, List<string> hits)
     {
-        for (int i = 0; i < len; i++)
+        for (int i = 0; i + 1 < len; i++)
         {
-            byte b = buf[i];
-            if (b >= 65 && b <= 90) b += 32;
-            List<int> cand = byFirst[b];
+            byte b0 = lower[buf[i]];
+            if (!pairOk[(b0 << 8) | lower[buf[i + 1]]]) continue;
+            List<int> cand = byFirst[b0];
             if (cand == null) continue;
             for (int c = 0; c < cand.Count; c++)
             {
                 int k = cand[c];
                 byte[] p = pats[k];
                 if (i + p.Length > len) continue;
-                if (hits.Contains(tags[k])) continue;
+                string tag = tags[k];
+                if (hits.Contains(tag)) continue;
                 int j = 1;
                 for (; j < p.Length; j++)
                 {
-                    byte x = buf[i + j];
-                    if (x >= 65 && x <= 90) x += 32;
-                    if (x != p[j]) break;
+                    if (lower[buf[i + j]] != p[j]) break;
                 }
-                if (j == p.Length) hits.Add(tags[k]);
+                if (j == p.Length && Boundary(buf, i, p.Length, len, wide[k] ? 2 : 1))
+                    hits.Add(tag);
             }
         }
     }
@@ -162,9 +243,8 @@ public static class SigCore
         return hits.ToArray();
     }
 
-    public static string[] ScanFile(string path)
+    static void ScanFileInto(string path, List<string> hits)
     {
-        var hits = new List<string>();
         using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
                                        FileShare.ReadWrite | FileShare.Delete, 1 << 16))
         {
@@ -178,12 +258,11 @@ public static class SigCore
                 Buffer.BlockCopy(buf, total - carry, buf, 0, carry);
             }
         }
-        return hits.ToArray();
     }
 
-    public static string[] ScanJar(string path)
+    static void ScanJarInto(string path, List<string> hits)
     {
-        var hits = new List<string>();
+        long budget = JarBudget;
         using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
                                        FileShare.ReadWrite | FileShare.Delete))
         using (var zip = new ZipArchive(fs, ZipArchiveMode.Read))
@@ -192,13 +271,15 @@ public static class SigCore
             {
                 byte[] nb = Encoding.UTF8.GetBytes(e.FullName);
                 Scan(nb, nb.Length, hits);
+                if (budget <= 0) continue;
 
                 string n = e.FullName.ToLowerInvariant();
                 bool readable = n.EndsWith(".class") || n.EndsWith(".json") || n.EndsWith(".txt")
                              || n.EndsWith(".properties") || n.EndsWith(".toml") || n.EndsWith(".mf")
                              || n.EndsWith(".yml");
-                if (!readable || e.Length == 0 || e.Length > 4 * 1024 * 1024) continue;
+                if (!readable || e.Length == 0 || e.Length > 2 * 1024 * 1024) continue;
 
+                budget -= e.Length;
                 using (Stream s = e.Open())
                 {
                     var ms = new MemoryStream((int)e.Length);
@@ -207,7 +288,38 @@ public static class SigCore
                 }
             }
         }
-        return hits.ToArray();
+    }
+
+    // Scans many files in parallel. Returns lines:  path <TAB> nameHits <TAB> contentHits
+    public static string[] ScanMany(string[] paths)
+    {
+        var results = new List<string>();
+        var opts = new ParallelOptions();
+        opts.MaxDegreeOfParallelism = Math.Max(1, Math.Min(8, Environment.ProcessorCount));
+        Parallel.ForEach(paths, opts, path =>
+        {
+            try
+            {
+                var nameHits = new List<string>();
+                var contentHits = new List<string>();
+                byte[] nb = Encoding.UTF8.GetBytes(Path.GetFileName(path));
+                Scan(nb, nb.Length, nameHits);
+                string ext = Path.GetExtension(path).ToLowerInvariant();
+                try
+                {
+                    if (ext == ".jar") ScanJarInto(path, contentHits);
+                    else ScanFileInto(path, contentHits);
+                }
+                catch (Exception) { }
+                if (nameHits.Count > 0 || contentHits.Count > 0)
+                {
+                    string line = path + "\t" + string.Join(",", nameHits.ToArray()) + "\t" + string.Join(",", contentHits.ToArray());
+                    lock (results) { results.Add(line); }
+                }
+            }
+            catch (Exception) { }
+        });
+        return results.ToArray();
     }
 }
 '@
@@ -286,15 +398,22 @@ function Show-Banner {
     Write-Host ''
 }
 
-# live one-line status shown while scanning
+# live one-line status shown while working
 $script:tick = 0
 function Show-Hud {
-    param([string]$Phase, [string]$Current)
+    param([string]$Phase, [string]$Text, [double]$Pct = -1, [string]$Eta = '')
     $script:tick++
-    $spin  = @('|', '/', '-', '\')
-    $frame = $spin[$script:tick % 4]
-    $el    = (Get-Date) - $started
-    $text  = ' {0} {1,-6} files {2,-6} flagged {3,-3} {4:mm\:ss}  {5}' -f $frame, $Phase, $scanned, $rows.Count, $el, $Current
+    $frames = @('|', '/', '-', '\')
+    $frame  = $frames[$script:tick % 4]
+    $el     = (Get-Date) - $started
+    $barTxt = ''
+    if ($Pct -ge 0) {
+        $cells  = [int][math]::Floor($Pct * 16)
+        $filled = ([string][char]0x2588) * $cells
+        $rest   = ([string][char]0x2591) * (16 - $cells)
+        $barTxt = ' [' + $filled + $rest + '] ' + ('{0,3}%' -f [int]($Pct * 100))
+    }
+    $text = ' {0} {1,-6}{2}  flagged {3,-3} {4:mm\:ss}{5}  {6}' -f $frame, $Phase, $barTxt, $rows.Count, $el, $Eta, $Text
     $cw = 100
     try { $cw = $Host.UI.RawUI.WindowSize.Width } catch { }
     if (-not $cw) { $cw = 100 }
@@ -340,12 +459,13 @@ function Write-Card {
 $rows = New-Object System.Collections.Generic.List[object]
 
 function Add-Row {
-    param($Source, $Name, $Location, [string[]]$Terms, $Modified)
+    param($Source, $Name, $Location, [string[]]$Terms, $Modified, [bool]$NameHit = $false, [bool]$Big = $false)
 
     $score = 0; $strongCount = 0; $medCount = 0
     $hot = @(); $hints = @()
     foreach ($t in ($Terms | Sort-Object)) {
         $wt = $db[$t]
+        if (-not $wt) { $wt = 1 }
         $score += $wt
         if ($wt -ge 3)     { $strongCount++; $hot += $t }
         elseif ($wt -eq 2) { $medCount++;    $hot += $t }
@@ -359,6 +479,9 @@ function Add-Row {
     if ($strongCount -ge 2 -or $score -ge 8) { $label = 'HIGH' }
     elseif ($strongCount -eq 1)              { $label = 'MEDIUM' }
     else                                     { $label = 'LOW' }
+
+    # a single hit buried inside a big binary is weak evidence
+    if ($Big -and -not $NameHit -and $strongCount -le 1 -and $label -eq 'MEDIUM') { $label = 'LOW' }
 
     $stamp = ''
     if ($Modified) { try { $stamp = ([datetime]$Modified).ToString('yyyy-MM-dd HH:mm') } catch { } }
@@ -375,31 +498,16 @@ function Add-Row {
     })
 }
 
-function Find-Candidates {
-    param([string[]]$Roots, [string[]]$SkipParts, [hashtable]$Exts)
-    $stack = New-Object 'System.Collections.Generic.Stack[string]'
-    foreach ($r in $Roots) { if (Test-Path -LiteralPath $r) { $stack.Push($r) } }
-    while ($stack.Count -gt 0) {
-        $dir = $stack.Pop()
-        $low = $dir.ToLowerInvariant()
-        $skip = $false
-        foreach ($s in $SkipParts) { if ($low.Contains($s)) { $skip = $true; break } }
-        if ($skip) { continue }
-        try {
-            foreach ($sub in [IO.Directory]::EnumerateDirectories($dir)) {
-                try {
-                    if ([IO.File]::GetAttributes($sub) -band [IO.FileAttributes]::ReparsePoint) { continue }
-                } catch { continue }
-                $stack.Push($sub)
-            }
-        } catch { }
-        try {
-            foreach ($f in [IO.Directory]::EnumerateFiles($dir)) {
-                $ext = [IO.Path]::GetExtension($f).ToLowerInvariant()
-                if ($Exts.ContainsKey($ext)) { $f }
-            }
-        } catch { }
-    }
+# true when the file carries a valid signature from a well-known publisher
+function Test-Trusted {
+    param([string]$FilePath)
+    try {
+        $sig = Get-AuthenticodeSignature -LiteralPath $FilePath -ErrorAction Stop
+        if ($sig.Status -ne 'Valid') { return $false }
+        $subject = [string]$sig.SignerCertificate.Subject
+        foreach ($p in $trustedPublishers) { if ($subject -like "*$p*") { return $true } }
+    } catch { }
+    return $false
 }
 
 function ConvertTo-HtmlText {
@@ -407,73 +515,146 @@ function ConvertTo-HtmlText {
     [System.Net.WebUtility]::HtmlEncode([string]$Text)
 }
 
+# Builds the list of candidate files (fast; no file contents are read here)
+function Find-Files {
+    param([string[]]$Roots, [hashtable]$SkipNames, [hashtable]$Exts, [int64]$MaxBytes)
+    $stack   = New-Object 'System.Collections.Generic.Stack[string]'
+    $visited = @{}
+    foreach ($r in $Roots) { if ($r -and (Test-Path -LiteralPath $r)) { $stack.Push($r) } }
+    $dirCount = 0
+    while ($stack.Count -gt 0) {
+        $dir = $stack.Pop()
+        if ($visited.ContainsKey($dir)) { continue }
+        $visited[$dir] = 1
+        $dirCount++
+        if ($dirCount % 150 -eq 0) { Show-Hud 'INDEX' ("{0} folders, {1} files  {2}" -f $dirCount, $files.Count, $dir) }
+        $di = $null
+        try { $di = New-Object System.IO.DirectoryInfo $dir } catch { continue }
+        try {
+            foreach ($sub in $di.EnumerateDirectories()) {
+                if ($sub.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+                if ($SkipNames.ContainsKey($sub.Name)) { continue }
+                $stack.Push($sub.FullName)
+            }
+        } catch { }
+        try {
+            foreach ($f in $di.EnumerateFiles()) {
+                if ($f.Length -gt 0 -and $f.Length -le $MaxBytes -and $Exts.ContainsKey($f.Extension.ToLowerInvariant())) { $f }
+            }
+        } catch { }
+    }
+}
+
 # ---------------------------------------------------------------------------
 # 5) Start
 # ---------------------------------------------------------------------------
 Clear-Host
 Show-Banner
+$started = Get-Date
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
            ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
+$up = $env:USERPROFILE
 if ($Path) {
     $roots = $Path
     $modeName = 'Custom'
-    $skipParts = @()
 } elseif ($Mode -eq 'Full') {
     $roots = [IO.DriveInfo]::GetDrives() |
              Where-Object { $_.IsReady -and ($_.DriveType -eq 'Fixed' -or $_.DriveType -eq 'Removable') } |
              ForEach-Object { $_.RootDirectory.FullName }
     $modeName = 'Full'
-    $skipParts = @('\windows\', '\winsxs\', '\windowsapps\', '\$recycle.bin\', '\system volume information\')
 } else {
-    $roots = @($env:USERPROFILE, (Join-Path $env:PUBLIC 'Downloads'))
+    $roots = @(
+        (Join-Path $up 'Downloads'), (Join-Path $up 'Desktop'), (Join-Path $up 'Documents'),
+        (Join-Path $up 'OneDrive'), (Join-Path $up 'curseforge'),
+        $env:APPDATA, $env:TEMP, (Join-Path $env:PUBLIC 'Downloads')
+    )
     $modeName = 'Quick'
-    $skipParts = @('\windows\', '\winsxs\', '\windowsapps\')
 }
 
+# folders that never contain what we are looking for (matched by folder name)
+$skipNames = @{}
+foreach ($n in @(
+    'node_modules', '.git', '__pycache__', 'windows', 'winsxs', 'windowsapps', '$recycle.bin',
+    'system volume information', 'assets', 'runtime', 'logs', 'crash-reports', 'saves',
+    'resourcepacks', 'shaderpacks', 'screenshots', 'cache', 'code cache', 'gpucache', 'indexeddb',
+    'local storage', 'service worker', 'discord', 'whatsapp', 'telegram desktop', 'spotify', 'slack',
+    'zoom', 'teams', 'microsoft', 'google', 'mozilla', 'opera software', 'brave-browser', 'nvidia',
+    'nvidia corporation', 'adobe', 'steam', 'steamapps', 'epic games', 'tlauncher', '.tlauncher',
+    'jetbrains', 'code', 'obs-studio', 'npm', 'python', 'dotnet', 'nuget'
+)) { $skipNames[$n] = 1 }
+
 $exts = @{ '.jar' = 1; '.exe' = 1; '.dll' = 1; '.bat' = 1; '.cmd' = 1 }
-$sizeLimit = [int64]$MaxSizeMB * 1MB
-$selfPath = $PSCommandPath
+$maxBytes = [int64]$MaxSizeMB * 1MB
 
 Write-Host "    mode: $modeName   admin: $isAdmin   signatures: $($allTerms.Count)" -ForegroundColor DarkGray
 if (-not $isAdmin) {
     Write-Host '    tip: run as Administrator to also read Prefetch (past program runs).' -ForegroundColor Yellow
 }
-Write-Host '    scanning...' -ForegroundColor Cyan
+Write-Host ''
 
 # ---------------------------------------------------------------------------
-# 6) Files
+# 6) Files: index first, then scan in parallel
 # ---------------------------------------------------------------------------
 $scanned = 0
-$started = Get-Date
+$files = New-Object System.Collections.Generic.List[object]
+Find-Files -Roots $roots -SkipNames $skipNames -Exts $exts -MaxBytes $maxBytes | ForEach-Object { $files.Add($_) }
 
-Find-Candidates -Roots $roots -SkipParts $skipParts -Exts $exts | ForEach-Object {
-    $file = $_
-    if ($selfPath -and ($file -ieq $selfPath)) { return }
+$total = $files.Count
+$scanStart = Get-Date
+$chunkSize = 48
 
-    $scanned++
-    if ($scanned % 40 -eq 0) { Show-Hud 'FILES' ([IO.Path]::GetFileName($file)) }
+for ($i = 0; $i -lt $total; $i += $chunkSize) {
+    $n    = [math]::Min($chunkSize, $total - $i)
+    $part = $files.GetRange($i, $n)
+    $map  = @{}
+    foreach ($f in $part) { $map[$f.FullName] = $f }
+    $paths = [string[]]@($part | ForEach-Object { $_.FullName })
 
-    $info = New-Object IO.FileInfo $file
-    if ($info.Length -eq 0 -or $info.Length -gt $sizeLimit) { return }
-
-    $found = New-Object System.Collections.Generic.List[string]
-    foreach ($h in [SigCore]::ScanText($info.Name)) { if (-not $found.Contains($h)) { $found.Add($h) } }
-
-    $content = @()
-    try {
-        if ($info.Extension -ieq '.jar') {
-            try { $content = [SigCore]::ScanJar($file) } catch { $content = [SigCore]::ScanFile($file) }
-        } else {
-            $content = [SigCore]::ScanFile($file)
-        }
-    } catch { }
-    foreach ($h in $content) { if (-not $found.Contains($h)) { $found.Add($h) } }
-
-    if ($found.Count -gt 0) {
-        Add-Row -Source 'File' -Name $info.Name -Location $file -Terms $found.ToArray() -Modified $info.LastWriteTime
+    $found = @{}
+    foreach ($line in [SigCore]::ScanMany($paths)) {
+        $cols = $line -split "`t"
+        $nh = @(); if ($cols.Count -gt 1 -and $cols[1]) { $nh = @($cols[1] -split ',') }
+        $ch = @(); if ($cols.Count -gt 2 -and $cols[2]) { $ch = @($cols[2] -split ',') }
+        $found[$cols[0]] = @{ Name = $nh; Content = $ch }
     }
+
+    # generic client names in file names (Vape V4.exe, Sigma Client.jar ...)
+    foreach ($f in $part) {
+        $mm = $nameRegex.Match($f.Name)
+        if ($mm.Success) {
+            $term = '{0} (file name)' -f $mm.Groups[2].Value
+            $db[$term] = 3
+            if (-not $found.ContainsKey($f.FullName)) { $found[$f.FullName] = @{ Name = @(); Content = @() } }
+            $found[$f.FullName].Name += $term
+        }
+    }
+
+    foreach ($path in @($found.Keys)) {
+        $fi = $map[$path]
+        if (-not $fi) { continue }
+        $e = $found[$path]
+        $hasName = ($e.Name.Count -gt 0)
+
+        if (-not $hasName) {
+            if ($fi.Name -match $trustedNameRegex) { continue }
+            $x = $fi.Extension.ToLowerInvariant()
+            if (($x -eq '.exe' -or $x -eq '.dll') -and (Test-Trusted -FilePath $path)) { continue }
+        }
+
+        $all = New-Object System.Collections.Generic.List[string]
+        foreach ($h in @($e.Name) + @($e.Content)) { if ($h -and -not $all.Contains($h)) { $all.Add($h) } }
+        Add-Row -Source 'File' -Name $fi.Name -Location $path -Terms $all.ToArray() -Modified $fi.LastWriteTime -NameHit $hasName -Big ($fi.Length -gt 20MB)
+    }
+
+    $scanned += $n
+    $pct  = $scanned / $total
+    $secs = ((Get-Date) - $scanStart).TotalSeconds
+    $etaS = 0
+    if ($scanned -gt 0) { $etaS = $secs * ($total - $scanned) / $scanned }
+    $eta  = '  ETA {0:mm\:ss}' -f [timespan]::FromSeconds($etaS)
+    Show-Hud 'SCAN' ("{0}/{1}  {2}" -f $scanned, $total, $part[$n - 1].Name) $pct $eta
 }
 
 # ---------------------------------------------------------------------------
@@ -483,23 +664,29 @@ Show-Hud 'PROCS' 'running processes'
 foreach ($p in Get-Process) {
     $hit = [SigCore]::ScanText("$($p.ProcessName) $($p.MainWindowTitle)")
     if ($hit.Count -gt 0) {
-        Add-Row -Source 'Process' -Name $p.ProcessName -Location ("PID $($p.Id) | $($p.MainWindowTitle)") -Terms $hit -Modified $p.StartTime
+        Add-Row -Source 'Process' -Name $p.ProcessName -Location ("PID $($p.Id) | $($p.MainWindowTitle)") -Terms $hit -Modified $p.StartTime -NameHit $true
     }
 }
 
 # ---------------------------------------------------------------------------
 # 8) Traces of past execution
 # ---------------------------------------------------------------------------
+Show-Hud 'TRACES' 'prefetch + recent'
 $traceSources = @(
     @{ Label = 'Prefetch'; Glob = (Join-Path $env:SystemRoot 'Prefetch\*.pf') },
     @{ Label = 'Recent';   Glob = (Join-Path $env:APPDATA 'Microsoft\Windows\Recent\*.lnk') }
 )
-Show-Hud 'TRACES' 'prefetch + recent'
 foreach ($src in $traceSources) {
     foreach ($item in Get-ChildItem -Path $src.Glob -Force) {
-        $hit = [SigCore]::ScanText($item.Name)
+        $hit = @([SigCore]::ScanText($item.Name))
+        $mm = $nameRegex.Match($item.Name)
+        if ($mm.Success) {
+            $term = '{0} (file name)' -f $mm.Groups[2].Value
+            $db[$term] = 3
+            $hit += $term
+        }
         if ($hit.Count -gt 0) {
-            Add-Row -Source $src.Label -Name $item.Name -Location $item.FullName -Terms $hit -Modified $item.LastWriteTime
+            Add-Row -Source $src.Label -Name $item.Name -Location $item.FullName -Terms $hit -Modified $item.LastWriteTime -NameHit $true
         }
     }
 }
