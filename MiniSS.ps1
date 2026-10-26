@@ -34,8 +34,8 @@ $Invite = 'https://discord.gg/95MmttMD6'
 # ---------------------------------------------------------------------------
 # 1) Signatures   weight: 3 = strong, 2 = medium, 1 = weak (never reported alone)
 # ---------------------------------------------------------------------------
-$db = @{}; $clientSet = @{}
-function Add-Terms { param([int]$Weight, [string]$List, [switch]$Client) foreach ($t in ($List -split '[,\r\n]+')) { $t = $t.Trim(); if ($t) { $db[$t] = $Weight; if ($Client) { $clientSet[$t] = 1 } } } }
+$db = @{}; $clientSet = @{}; $moduleSet = @{}
+function Add-Terms { param([int]$Weight, [string]$List, [switch]$Client, [switch]$Module) foreach ($t in ($List -split '[,\r\n]+')) { $t = $t.Trim(); if ($t) { $db[$t] = $Weight; if ($Client) { $clientSet[$t] = 1 }; if ($Module) { $moduleSet[$t] = 1 } } } }
 # brand of a client term ("Vape V4", "VapeLite", "vape.gg" -> vape): a scanner / wordlist mentions many brands, a real cheat only its own
 function Get-Brand { param($t) ($t.ToLower() -replace '[^a-z0-9]', '' -replace '(client|v\d+|lite|gg|plus|\d+)+$', '') }
 # number of DIFFERENT things ("Meteor Client" + "meteor-client" + "Auto-Totem" + "AutoTotem" = 2, not 4)
@@ -45,7 +45,7 @@ function Get-W { param($t) $w = $db[$t]; if ($w) { $w } else { 1 } }
 Add-Terms 3 'AutoTotem, Auto Totem, Auto_Totem, Auto-Totem, InventoryTotem, InvTotem, AutoInventoryTotem, TotemHit, TotemSwap, AutoCrystal, CrystalAura, OneHitCrystal, CrystalOptimizer, FastCrystal, AutoHitCrystal,
     AnchorMacro, AnchorAura, AutoAnchor, AutoStun, StunSlam, Stun-Slam, ShieldBreaker, AutoPot, AutoDoubleHand, TriggerBot, KillAura, AimAssist, AimBot, AutoClicker, Auto Clicker, Auto_Clicker, Auto-Clicker,
     InvMove, MaceDMG, MaceAura, AutoMace, NoFall, AutoWTap, ScaffoldWalk, AutoCrit, PacketFly, AntiKnockback, NoKnockback, FakeLag, TargetStrafe, AutoBlock, ChestStealer, InvCleaner, InventoryCleaner,
-    AutoSoup, PlayerESP, StorageESP, ChestESP, GhostClicker, Ghost Clicker, JitterClick, Jitter Click, Rapid Clicker, FastClicker'
+    AutoSoup, PlayerESP, StorageESP, ChestESP, GhostClicker, Ghost Clicker, JitterClick, Jitter Click, Rapid Clicker, FastClicker' -Module
 Add-Terms 3 'LiquidBounce, meteordevelopment, meteor-client, MeteorClient, Meteor Client, wurstclient, wurst-client, Wurst Client, BleachHack, Aristois, RusherHack, ThunderHack, FutureClient, Future Client,
     vape.gg, VapeV4, VapeV3, VapeLite, Vape Client, Vape V4, Vape V3, Vape Lite, RavenB+, Raven B+, RavenBPlus, SigmaClient, Sigma Client, Sigma5, Sigma 5.0, ImpactClient, Impact Client, JigsawClient,
     Jigsaw Client, AresClient, Ares Client, HydraClient, Hydra Client, XuluClient, Xulu Client, FluxClient, Flux Client, PerishClient, Perish Client, JexClient, Jex Client, FrostClient, Frost Client,
@@ -416,40 +416,47 @@ $rows = New-Object System.Collections.Generic.List[object]
 
 function Add-Row {
     # NameT = hits in file name / path, EntT = hits in jar entry names, ConT = hits in code / metadata strings only
-    param($Source, $Name, $Location, [string[]]$NameT = @(), [string[]]$EntT = @(), [string[]]$ConT = @(), $Modified, [bool]$Big = $false, [int]$Bump = 0, [string[]]$Extra = @(), [bool]$Zip = $false)
+    # Kind: jar (default) | zip (modpacks, backups hold many mods) | bin (exe / dll)
+    param($Source, $Name, $Location, [string[]]$NameT = @(), [string[]]$EntT = @(), [string[]]$ConT = @(), $Modified, [bool]$Big = $false, [int]$Bump = 0, [string[]]$Extra = @(), [string]$Kind = 'jar')
     $n = @($NameT | Select-Object -Unique)                                         # the FILE itself is named like a cheat
     $e = @($EntT | Where-Object { $n -notcontains $_ } | Select-Object -Unique)    # a class / package inside is named like a cheat
-    $b = @($ConT | Where-Object { ($n + $e) -notcontains $_ } | Select-Object -Unique)   # only a string inside code: weakest evidence
+    $b = @($ConT | Where-Object { ($n + $e) -notcontains $_ } | Select-Object -Unique)   # only a string inside code
     $a = @($n + $e)
-    $As = @($a | Where-Object { (Get-W $_) -ge 3 })
-    $Am = @($n | Where-Object { (Get-W $_) -eq 2 })     # medium terms (xray, freecam, baritone...) count only when the file itself is named like that:
-    $Em = @($e | Where-Object { (Get-W $_) -eq 2 })     # normal mods have FreecamUtil / Baritone-compat classes, so inside a jar they need 2+ different ones
-    $Bs = @($b | Where-Object { (Get-W $_) -ge 3 })
-    $weak = @(($a + $b) | Where-Object { (Get-W $_) -le 1 })
-    # 3+ different cheat strings in one jar = real cheat code. Zips (modpacks, backups) hold many mods, so they need 4+
-    if ((Get-Units $Bs) -ge $(if ($Zip) { 4 } else { 3 })) { $As += $Bs; $Bs = @() } elseif ($Zip) { $Bs = @() }
-    $emu = ((Get-Units $Em) -ge 2)
-    if ($As.Count + $Am.Count + $Bs.Count -eq 0 -and -not $emu -and -not $ShowWeak) { return }
-    $hot = @($As + $Am + $Bs); if ($emu) { $hot += $Em }; if ($hot.Count -eq 0) { $hot = $weak; $weak = @() }
+    $strong = { (Get-W $_) -ge 3 }
+    $As = @($n | Where-Object $strong)                                             # file named like a cheat (brand or module)
+    $Am = @($n | Where-Object { (Get-W $_) -eq 2 })                                # medium terms (xray, freecam...) only count in the FILE name
+    $As += @($e | Where-Object { (Get-W $_) -ge 3 -and -not $moduleSet.ContainsKey($_) })   # class / package named like a cheat BRAND (meteordevelopment/..)
+    $pool = @(@($e + $b) | Where-Object { (Get-W $_) -ge 3 -and $moduleSet.ContainsKey($_) } | Select-Object -Unique)   # generic module names (NoFall, AimAssist...)
+    $Bbr = @($b | Where-Object { (Get-W $_) -ge 3 -and -not $moduleSet.ContainsKey($_) })  # brand string inside code
+    $weak = @(($a + $b) | Where-Object { (Get-W $_) -le 1 -or (Get-W $_) -eq 2 } | Where-Object { $n -notcontains $_ })
+    $struct = ($As.Count -gt 0)
+    # One generic module word (NoFall, AimAssist, NoKnockback...) is normal in legit mods; a cheat has MANY. Need 3+ different (5+ in zips / exe)
+    $pu = Get-Units $pool
+    if ($pu -ge $(if ($Kind -eq 'jar') { 3 } else { 5 })) { $As += $pool; $pool = @() } elseif ($pu -lt 2 -or $Kind -eq 'zip') { $pool = @() }
+    # A cheat-client name inside code is often just a compat / incompat list (optifabric, anti-cheat). Jars need 2+, zips 4+
+    $bu = Get-Units $Bbr
+    if ($bu -ge $(if ($Kind -eq 'zip') { 4 } else { 3 })) { $As += $Bbr; $Bbr = @() } elseif ($Kind -eq 'zip' -or ($Kind -eq 'jar' -and $bu -lt 2)) { $Bbr = @() }
+    $low = @($pool) + @($Bbr)
+    if ($As.Count + $Am.Count + $low.Count -eq 0 -and -not $ShowWeak) { return }
+    $hot = @($As + $Am + $low); if ($hot.Count -eq 0) { $hot = @($weak); $weak = @() }
 
-    if ((Get-Units $As) -ge 2 -or ($As.Count -ge 1 -and $Bs.Count -ge 1)) { $lvl = 2 }
-    elseif ($As.Count -ge 1 -or $Am.Count -ge 1 -or (Get-Units $Bs) -ge 2) { $lvl = 1 }
-    else { $lvl = 0 }
-    if ($Big -and $a.Count -eq 0 -and $lvl -eq 1) { $lvl = 0 }                   # hits only inside a big binary
-    if ($As.Count -ge 1) { $lvl = [math]::Min(2, $lvl + $Bump) }                 # hidden / disguised file
+    if ($As.Count -ge 1 -or $Am.Count -ge 1) { $lvl = 1 } else { $lvl = 0 }
+    if ((Get-Units $As) -ge 2 -and ($struct -or $pu -ge 5)) { $lvl = 2 }          # HIGH: two different cheats / names, backed by file or class names
+    if ($Big -and -not $struct -and $lvl -eq 1) { $lvl = 0 }                      # hits only inside a big binary
+    if ($As.Count -ge 1) { $lvl = [math]::Min(2, $lvl + $Bump) }                  # hidden / disguised file
     if ($Name -match '\.(log|txt)$') { $lvl = [math]::Min($lvl, 1) }
-    if ($a.Count -eq 0) { $Extra += 'code strings only' }
+    if (-not $struct -and $Am.Count -eq 0) { $Extra += 'code strings only' }
 
     $stamp = ''; if ($Modified) { try { $stamp = ([datetime]$Modified).ToString('yyyy-MM-dd HH:mm') } catch { } }
     $rows.Add([pscustomobject]@{
-        Severity = @('LOW', 'MEDIUM', 'HIGH')[$lvl]; Score = (3 * $As.Count + 2 * ($Am.Count + $Bs.Count) + $Em.Count); Source = $Source; Name = $Name
+        Severity = @('LOW', 'MEDIUM', 'HIGH')[$lvl]; Score = (3 * $As.Count + 2 * $Am.Count + $low.Count); Source = $Source; Name = $Name
         Matches = ($hot -join ', '); Hints = ((@($weak) + $Extra) -join ', '); Modified = $stamp; Location = $Location })
 }
 
 # one card per thing: the same file in many folders / Recent / Prefetch / Recycle Bin is merged into a single row
 function Merge-Rows {
     $lv = @{ LOW = 0; MEDIUM = 1; HIGH = 2 }
-    $key = { if ($_.Source -eq 'Process') { 'p|' + $_.Name } else { $_.Name.ToLower() -replace '\.lnk$', '' -replace '-[0-9a-f]{8}\.pf$', '' -replace '\.pf$', '' -replace '\d+', '#' } }
+    $key = { if ($_.Source -eq 'Process') { 'p|' + $_.Name } else { $_.Name.ToLower() -replace '\.lnk$', '' -replace '-[0-9a-f]{8}\.pf$', '' -replace '\.pf$', '' -replace ' \(\d+\)', '' -replace ' - copy', '' -replace '[0-9a-f]{8,}', '#' -replace '\d+', '#' -replace '(#[.+_ -]?)+', '#' } }
     @($rows | Group-Object $key | ForEach-Object {
         $g = @($_.Group | Sort-Object @{ Expression = { $lv[$_.Severity] }; Descending = $true }, @{ Expression = { $_.Score }; Descending = $true }); $t = $g[0]
         [pscustomobject]@{
@@ -508,7 +515,7 @@ $skipList = @('node_modules', '.git', '__pycache__', 'windows', 'winsxs', 'windo
     'npm', 'python', 'dotnet', 'nuget')
 if (-not ($Deep -or $Mode -eq 'Full' -or $Path)) { $skipList += 'libraries' }
 
-Write-Host "    mode: $modeName   admin: $isAdmin   signatures: $($allTerms.Count)   deep: $([bool]$Deep)" -ForegroundColor DarkGray
+Write-Host "    mode: $modeName   admin: $isAdmin   signatures: $($allTerms.Count)   deep: $([bool]$Deep)   build: 6" -ForegroundColor DarkGray
 if (-not $isAdmin) { Write-Host '    tip: run as Administrator to also read Prefetch, Windows\Temp (past program runs).' -ForegroundColor Yellow }
 Write-Host ''
 
@@ -542,7 +549,7 @@ for ($i = 0; $i -lt $total; $i += 96) {
         if ($p -match '\\Prefetch\\') { $src = 'Prefetch' } elseif ($p -match '\\Recent\\') { $src = 'Recent' } elseif ($p -match '\$Recycle\.Bin') { $src = 'Recycle (deleted)' } else { $src = 'File' }
         if ($src -like 'Recycle*') { $nm = Get-Orig $p $nm }
         Add-Row -Source $src -Name $nm -Location $p -NameT $nh -EntT $en -ConT $ch -Modified ([IO.File]::GetLastWriteTime($p)) `
-                -Big (([IO.FileInfo]$p).Length -gt 20MB) -Bump ([int]($hid -or $dis)) -Extra $x -Zip ($ext -eq '.zip')
+                -Big (([IO.FileInfo]$p).Length -gt 20MB) -Bump ([int]($hid -or $dis)) -Extra $x -Kind $(if ($ext -eq '.zip') { 'zip' } elseif ($ext -eq '.exe' -or $ext -eq '.dll') { 'bin' } else { 'jar' })
     }
     $scanned += $paths.Count
     $secs = ((Get-Date) - $t0).TotalSeconds
