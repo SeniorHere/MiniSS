@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    MiniSS - Mini ScreenShare scanner (v3.1 - lightweight)
+    MiniSS - Mini ScreenShare scanner (v3.2 - targeted evidence)
     Author : Senior
     Discord: https://discord.gg/95MmttMD6
 
@@ -495,7 +495,7 @@ function Show-Banner {
     $pw = 56
     $host1 = 'host {0}   |   {1}' -f $env:COMPUTERNAME, (Get-Date -Format 'yyyy-MM-dd HH:mm')
     $items = @(
-        @('MiniSS  //  Screenshare Scanner        v3.1', 'White'),
+        @('MiniSS  //  Screenshare Scanner        v3.2', 'White'),
         @('by Senior   |   Senior Academy', 'Magenta'),
         @($Invite, 'Cyan'),
         @('RED = suspicious    order: LOW > MEDIUM > HIGH', 'Gray'),
@@ -572,6 +572,8 @@ function Write-Card {
 # 4) Helpers
 # ---------------------------------------------------------------------------
 $rows = New-Object System.Collections.Generic.List[object]
+
+try { if (-not (Test-Path -LiteralPath $OutDir)) { [void](New-Item -ItemType Directory -Path $OutDir -Force) } } catch { $OutDir = [IO.Path]::GetTempPath() }
 
 function Add-Row {
     param($Source, $Name, $Location, [string[]]$Terms, $Modified, [bool]$NameHit = $false, [bool]$Big = $false)
@@ -655,18 +657,18 @@ if ($Path) {
     $modeName = 'Full'
 } else {
     $rootSpecs = @(
-        ('5|' + (Join-Path $up 'Downloads')),
+        ('12|' + (Join-Path $up 'Downloads')),
         ('5|' + (Join-Path $up 'Desktop')),
         ('4|' + (Join-Path $up 'Documents')),
         ('3|' + (Join-Path $up 'OneDrive')),
         ('4|' + (Join-Path $up 'curseforge')),
-        ('6|' + (Join-Path $env:APPDATA '.minecraft')),
+        ('12|' + (Join-Path $env:APPDATA '.minecraft')),
         ('5|' + (Join-Path $env:APPDATA 'PrismLauncher')),
         ('5|' + (Join-Path $env:APPDATA 'MultiMC')),
         ('5|' + (Join-Path $env:APPDATA 'ModrinthApp')),
         ('5|' + (Join-Path $env:APPDATA 'com.modrinth.theseus')),
         ('1|' + $env:APPDATA),
-        ('3|' + $env:TEMP),
+        ('12|' + $env:TEMP),
         ('3|' + (Join-Path $env:PUBLIC 'Downloads'))
     )
     $modeName = 'Quick'
@@ -803,6 +805,51 @@ foreach ($src in $traceSources) {
             }
         }
     } catch { }
+
+    # For Recent shortcuts, inspect the resolved target as well as the .lnk filename.
+    # Shortcut names alone are often generic; target path gives better context.
+    if ($src.Label -eq 'Recent') {
+        try {
+            $shell = New-Object -ComObject WScript.Shell
+            foreach ($full in [IO.Directory]::EnumerateFiles($src.Dir, '*.lnk')) {
+                try {
+                    $shortcut = $shell.CreateShortcut($full)
+                    $targetText = [string]$shortcut.TargetPath + ' ' + [string]$shortcut.Arguments
+                    if ([string]::IsNullOrWhiteSpace($targetText)) { continue }
+                    $targetHits = @([SigCore]::ScanText($targetText))
+                    if ($targetHits.Count -gt 0) {
+                        Add-Row -Source 'Recent Target' -Name ([IO.Path]::GetFileName($full)) `
+                            -Location ($full + ' -> ' + $targetText) -Terms $targetHits `
+                            -Modified ([IO.File]::GetLastWriteTime($full)) -NameHit $false
+                    }
+                } catch { }
+            }
+            [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+        } catch { }
+    }
+
+    # Prefetch files can retain the executable name/path after the original file is gone.
+    # Read only small .pf traces and inspect ASCII/UTF-16 strings; this is evidence of
+    # execution history, never proof that a cheat was used in-game.
+    if ($src.Label -eq 'Prefetch') {
+        try {
+            foreach ($full in [IO.Directory]::EnumerateFiles($src.Dir, '*.pf')) {
+                try {
+                    $fi = New-Object IO.FileInfo($full)
+                    if ($fi.Length -le 0 -or $fi.Length -gt 8MB) { continue }
+                    $bytes = [IO.File]::ReadAllBytes($full)
+                    $ascii = [Text.Encoding]::ASCII.GetString($bytes)
+                    $unicode = [Text.Encoding]::Unicode.GetString($bytes)
+                    $traceText = [IO.Path]::GetFileNameWithoutExtension($full) + ' ' + $ascii + ' ' + $unicode
+                    $traceHits = @([SigCore]::ScanText($traceText))
+                    if ($traceHits.Count -gt 0) {
+                        Add-Row -Source 'Prefetch Content' -Name ([IO.Path]::GetFileName($full)) `
+                            -Location $full -Terms $traceHits -Modified $fi.LastWriteTime -NameHit $true
+                    }
+                } catch { }
+            }
+        } catch { }
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -910,6 +957,7 @@ if ($rows.Count -gt 0) {
 
 Write-Host ''
 Write-Host '    a match is a lead, not proof - check the path and date first.' -ForegroundColor DarkGray
+Write-Host '    Prefetch/Recent show traces, not proof of in-game use; unknown files are not automatically cheats.' -ForegroundColor DarkGray
 Write-Host "    MiniSS by $Author  |  $Invite" -ForegroundColor Magenta
 Write-Host ''
 
