@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    MiniSS - Mini ScreenShare scanner (v3.3 - targeted evidence)
+    MiniSS - Mini ScreenShare scanner (v3.4 - improved detection and severity)
     Author : Senior
     Discord: https://discord.gg/95MmttMD6
 
@@ -74,7 +74,8 @@ Add-Terms 3 @(
 )
 # Strong: cheat clients (distinctive names)
 Add-Terms 3 @(
-    'LiquidBounce', 'meteordevelopment', 'meteor-client', 'MeteorClient', 'Meteor Client',
+    'Wurst', 'WurstClient', 'Wurst Client', 'Wurst-Client', 'WurstMC',
+    'LiquidBounce', 'LiquidBounce Nextgen', 'LiquidBounce-Nextgen', 'meteordevelopment', 'meteor-client', 'MeteorClient', 'Meteor Client',
     'OringoClient', 'Oringo Client', 'Dortware', 'Dortware Client', 'Asteria Client', 'AsteriaClient',
     'Haruka Client', 'HarukaClient', 'Augustus Client', 'AugustusClient', 'Vega Client', 'VegaClient',
     'wurstclient', 'wurst-client', 'Wurst Client', 'BleachHack', 'Aristois', 'RusherHack', 'ThunderHack',
@@ -97,7 +98,9 @@ Add-Terms 3 @(
     'InertiaClient', 'Inertia Client', 'NodusClient', 'CosmosClient', 'Cosmos Client',
     'BozeClient', 'Boze Client', 'Nursultan', 'CelestialClient', 'Celestial Client',
     'ExpensiveClient', 'Expensive Client', 'Wexside', 'Akrien', 'RemixClient', 'Remix Client',
-    'MoonClient', 'Moon Client', 'Huzuni', 'Lambda Client', 'lambda-client', 'gamesense.pub', 'GameSense Client'
+    'MoonClient', 'Moon Client', 'Huzuni', 'Lambda Client', 'lambda-client', 'gamesense.pub', 'GameSense Client',
+    'Vape', 'VapeClient', 'Vape Client', 'Vape V4', 'Vape V3', 'Vape Lite', 'VapeLite',
+    'Wurst Client', 'WurstClient', 'Wurst', 'LiquidBounce', 'Meteor Client', 'MeteorClient'
 )
 # Medium
 Add-Terms 2 @(
@@ -115,7 +118,7 @@ Add-Terms 1 @(
 
 # Generic client names: matched in FILE NAMES only, and only together with a typical suffix
 # (e.g. "Vape V4.exe", "Sigma Client.jar", "Raven B+.jar", "Impact_loader.exe").
-$genericNames = 'vape|raven|sigma|rise|novoline|tenacity|astolfo|impact|jigsaw|ares|hydra|xulu|flux|perish|jex|frost|itami|polar|curse|fdp|dopium|slinky|doomsday|entropy|drip|exhibition|zeroday|wolfram|inertia|nursultan|celestial|expensive|wexside|akrien|moon|remix|huzuni'
+$genericNames = 'wurst|liquidbounce|meteor|vape|raven|sigma|rise|novoline|tenacity|astolfo|impact|jigsaw|ares|hydra|xulu|flux|perish|jex|frost|itami|polar|curse|fdp|dopium|slinky|doomsday|entropy|drip|exhibition|zeroday|wolfram|inertia|nursultan|celestial|expensive|wexside|akrien|moon|remix|huzuni'
 $nameRegex = New-Object System.Text.RegularExpressions.Regex(
     ('(?i)(^|[^a-z0-9])(' + $genericNames + ')[ _\-.]*(client|loader|injector|crack(ed)?|hack(ed)?|cheat|ghost|lite|v\d+(\.\d+)*|b\+{1,2}|\d+(\.\d+)+)([^a-z0-9]|$)'))
 
@@ -280,7 +283,8 @@ public static class SigCore
     // Jar/zip: entry names + small metadata files; .class contents only with -Deep
     static void ScanJarInto(string path, List<string> hits)
     {
-        bool isZip = Path.GetExtension(path).Equals(".zip", StringComparison.OrdinalIgnoreCase);
+        string archiveExt = Path.GetExtension(path);
+        bool isZip = archiveExt.Equals(".zip", StringComparison.OrdinalIgnoreCase) || archiveExt.Equals(".mrpack", StringComparison.OrdinalIgnoreCase);
         long budget = isZip ? ZipBudget : JarBudget;
         bool deep = Deep;
         using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
@@ -416,7 +420,7 @@ public static class SigCore
     {
         var results = new List<string>();
         var opts = new ParallelOptions();
-        opts.MaxDegreeOfParallelism = Math.Max(1, Math.Min(6, Environment.ProcessorCount - 1));
+        opts.MaxDegreeOfParallelism = Math.Max(1, Math.Min(3, Environment.ProcessorCount - 1));
         Parallel.ForEach(paths, opts, path =>
         {
             try
@@ -428,7 +432,7 @@ public static class SigCore
                 string ext = Path.GetExtension(path).ToLowerInvariant();
                 try
                 {
-                    if (ext == ".jar" || ext == ".zip") ScanJarInto(path, contentHits);
+                    if (ext == ".jar" || ext == ".zip" || ext == ".mrpack") ScanJarInto(path, contentHits);
                     else ScanFileInto(path, contentHits);
                 }
                 catch (Exception) { }
@@ -608,12 +612,22 @@ function Add-Row {
     if ($strongCount -eq 0 -and $medCount -eq 0 -and -not $ShowWeak) { return }
     if ($hot.Count -eq 0) { $hot = $hints; $hints = @() }
 
-    if ($strongCount -ge 2 -or $score -ge 8) { $label = 'HIGH' }
-    elseif ($strongCount -eq 1)              { $label = 'MEDIUM' }
-    else                                     { $label = 'LOW' }
+    # Severity policy: complete client signatures are HIGH; a single limited
+    # module is LOW; stronger individual modules are MEDIUM; multiple independent
+    # strong signals can raise a result. Names are only leads, not proof.
+    $evidenceText = ([string]$Name + ' ' + ($Terms -join ' '))
+    $fullClientRegex = '(?i)(^|[^a-z0-9])(wurst(client)?|liquidbounce( nextgen)?|meteor(client)?|vape( v?[34]| lite|client)?|raven( b\+{1,2}|client)?|sigma( client|\s*5(\.0)?)?|rise(client)?|novoline(client)?|tenacity(client)?|astolfo(client)?|impact(client)?|jigsaw(client)?|bleachhack|aristois|rusherhack|future(client)?|inertia(client)?|wexside|huzuni|fdp(client)?|thunderhack)([^a-z0-9]|$)'
+    $isFullClient = ($evidenceText -match $fullClientRegex)
+    $singleLightModule = ($strongCount -eq 1 -and (($Terms -join ' ') -match '(?i)\b(Freecam|FreeCamera|FullBright|Fullbright)\b'))
 
-    # a single hit buried inside a big binary is weak evidence
-    if ($Big -and -not $NameHit -and $strongCount -le 1 -and $label -eq 'MEDIUM') { $label = 'LOW' }
+    if ($isFullClient)                         { $label = 'HIGH' }
+    elseif ($strongCount -ge 2 -or $score -ge 8) { $label = 'HIGH' }
+    elseif ($singleLightModule)                 { $label = 'LOW' }
+    elseif ($strongCount -eq 1 -or $medCount -ge 1) { $label = 'MEDIUM' }
+    else                                        { $label = 'LOW' }
+
+    # A lone string found inside a large binary is weaker than a filename/signature hit.
+    if ($Big -and -not $NameHit -and -not $isFullClient -and $strongCount -le 1 -and $label -eq 'MEDIUM') { $label = 'LOW' }
 
     $stamp = ''
     if ($Modified) { try { $stamp = ([datetime]$Modified).ToString('yyyy-MM-dd HH:mm') } catch { } }
@@ -673,6 +687,11 @@ if ($Path) {
 } else {
     $rootSpecs = @(
         ('12|' + (Join-Path $up 'Downloads')),
+        ('8|' + (Join-Path $env:LOCALAPPDATA 'Packages')),
+        ('5|' + (Join-Path $env:LOCALAPPDATA 'Temp')),
+        ('4|' + (Join-Path $env:APPDATA 'Badlion Client')),
+        ('4|' + (Join-Path $env:APPDATA 'LunarClient')),
+        ('4|' + (Join-Path $env:LOCALAPPDATA 'Programs')),
         ('5|' + (Join-Path $up 'Desktop')),
         ('4|' + (Join-Path $up 'Documents')),
         ('3|' + (Join-Path $up 'OneDrive')),
@@ -720,7 +739,7 @@ Write-Host ''
 $scanned = 0
 Show-Hud 'INDEX' 'listing files...'
 $indexLines = [SigCore]::Index([string[]]$rootSpecs, [string[]]$skipList,
-                               [string[]]@('.jar', '.zip', '.exe', '.dll', '.bat', '.cmd'), $maxBytes, [int64]300MB)
+                               [string[]]@('.jar', '.zip', '.mrpack', '.rar', '.7z', '.litemod', '.exe', '.dll', '.bat', '.cmd', '.ps1', '.vbs', '.js', '.py', '.json', '.toml', '.cfg', '.conf', '.properties', '.txt'), $maxBytes, [int64]300MB)
 
 $pathList = New-Object 'System.Collections.Generic.List[string]'
 $sizeOf = @{}
