@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    MiniSS - Mini ScreenShare scanner (v3.7 - targeted archive and string analysis)
+    MiniSS - Mini ScreenShare scanner (v3.8 - coverage and lightweight Java strings)
     Author : Senior
     Discord: https://discord.gg/95MmttMD6
 
@@ -70,7 +70,7 @@ Add-Terms 3 @(
     'TimerHack', 'FastUse', 'FastEat', 'AutoFish', 'AutoMine', 'AutoTool', 'ChestStealer',
     'AutoSteal', 'AutoGG', 'AutoRespawn', 'AutoQueue', 'AutoRequeue', 'Blink', 'Disabler',
     'InvMove', 'MaceDMG', 'MaceAura', 'AutoMace', 'NoFall', 'AutoWTap', 'ScaffoldWalk',
-    'AutoCrit', 'PacketFly', 'AntiKnockback', 'NoKnockback'
+    'AutoCrit', 'PacketFly', 'AntiKnockback', 'NoKnockback', 'Scaffold', 'XRay', 'X-Ray', 'Flight', 'AutoTotem', 'CrystalAura', 'TriggerBot', 'KillAura', 'AimAssist', 'AutoClicker', 'Reach', 'Velocity', 'Jesus', 'SpeedHack', 'Step', 'Phase', 'NoClip', 'ChestESP', 'PlayerESP', 'StorageESP', 'Tracers', 'TargetStrafe', 'SilentAim', 'AntiBot', 'AutoWeapon', 'AutoSword', 'FastPlace', 'FastBreak', 'Timer', 'Blink', 'Disabler', 'NoSlow', 'InventoryMove'
 )
 # Strong: cheat clients (distinctive names)
 Add-Terms 3 @(
@@ -115,7 +115,7 @@ Add-Terms 1 @(
     'Flight', 'Macro', 'Velocity', 'XRay', 'X-Ray', 'FastPlace', 'Hitbox', 'Bhop', 'WallHack', 'Injector',
     'Criticals', 'Backtrack', 'AutoHotkey', 'Surround', 'AutoArmor', 'FreeCam', 'Fullbright', 'OreESP',
     # Java/Minecraft behavior indicators: weak individually; clusters can flag unknown mods for review.
-    'C02PacketUseEntity', 'CPacketUseEntity', 'C0BPacketEntityAction', 'CPacketPlayer',
+    'C02PacketUseEntity', 'CPacketUseEntity', 'C0BPacketEntityAction', 'CPacketPlayer', 'attackEntity', 'attack', 'autototem', 'crystalaura', 'triggerbot', 'killaura', 'aimassist', 'scaffold', 'xray', 'flight', 'autocrystal', 'silentaim', 'targetstrafe', 'packetfly', 'freecam', 'entityesp', 'playeresp', 'chestesp', 'storageesp', 'wallhack', 'reach', 'velocity', 'fastplace', 'fastbreak',
     'sendPacket', 'attackEntity', 'getMouseOver', 'reachDistance', 'timerSpeed',
     'EntityPlayerSP', 'ClientPlayerEntity', 'PlayerEntity', 'MinecraftClient',
     'org.spongepowered.asm.mixin', 'Mixin', 'EntityRenderer', 'WorldRenderer',
@@ -166,8 +166,8 @@ public static class SigCore
     static byte[] lower = MakeLower();
     static int longest = 1;
     const int Chunk = 512 * 1024;
-    const long JarBudget = 6L * 1024 * 1024;
-    const long ZipBudget = 6L * 1024 * 1024;
+    const long JarBudget = 3L * 1024 * 1024;
+    const long ZipBudget = 2L * 1024 * 1024;
     public static bool Deep = false;
 
     static byte[] MakeLower()
@@ -296,7 +296,7 @@ public static class SigCore
         bool deep = Deep;
         string lowerPath = path.ToLowerInvariant();
         bool inMinecraft = lowerPath.Contains("\\.minecraft\\") || lowerPath.Contains("\\minecraft\\");
-        bool inTargetFolder = lowerPath.Contains("\\mods\\") || lowerPath.Contains("\\modpacks\\") || lowerPath.Contains("\\downloads\\") || lowerPath.Contains("\\temp\\");
+        bool inTargetFolder = lowerPath.Contains("\\mods\\") || lowerPath.Contains("\\modpacks\\") || lowerPath.Contains("\\downloads\\") || lowerPath.Contains("\\temp\\") || lowerPath.Contains("\\resourcepacks\\") || lowerPath.Contains("\\shaderpacks\\");
         // Class constant-pool strings are scanned in mod/download/temp archives and in
         // Minecraft archives outside the huge vanilla libraries/versions trees.
         bool inVanillaBulk = lowerPath.Contains("\\libraries\\") || lowerPath.Contains("\\versions\\");
@@ -414,7 +414,7 @@ public static class SigCore
             }
             if (Directory.Exists(p)) rootList.Add(new KeyValuePair<int, string>(d, p));
         }
-        // deeper roots first, so a shallow parent root (AppData) never limits a deeper child root (.minecraft)
+        // Hidden files/directories are included by EnumerateFiles/EnumerateDirectories; deeper roots first, so a shallow parent root never limits .minecraft.
         rootList.Sort((k1, k2) => k2.Key.CompareTo(k1.Key));
 
         var dirs = new List<string>();
@@ -498,7 +498,10 @@ public static class SigCore
                     if (ext == ".jar" || ext == ".zip" || ext == ".mrpack")
                     {
                         string lp = path.ToLowerInvariant();
-                        bool likely = lp.Contains("\\mods\\") || lp.Contains("\\downloads\\") || lp.Contains("\\temp\\") || lp.Contains("\\$recycle.bin\\");
+                        bool inMcTarget = lp.Contains("\\.minecraft\\mods\\") || lp.Contains("\\.minecraft\\resourcepacks\\") || lp.Contains("\\.minecraft\\shaderpacks\\") || lp.Contains("\\.minecraft\\modpacks\\") || lp.Contains("\\.minecraft\\versions\\");
+                        bool inMinecraftTree = lp.Contains("\\.minecraft\\") || lp.Contains("\\minecraft\\");
+                        // Inspect archive contents throughout .minecraft, but vanilla libraries/versions only get metadata/name checks to avoid a large slowdown.
+                        bool likely = (inMinecraftTree && !lp.Contains("\\libraries\\")) || inMcTarget || lp.Contains("\\downloads\\") || lp.Contains("\\temp\\") || lp.Contains("\\$recycle.bin\\") || lp.Contains("\\recent\\");
                         // Avoid decompressing hundreds of ordinary game libraries in Quick mode.
                         if (likely || Deep || ext == ".mrpack") ScanJarInto(path, contentHits);
                     }
@@ -583,7 +586,7 @@ function Show-Banner {
     $pw = 56
     $host1 = 'host {0}   |   {1}' -f $env:COMPUTERNAME, (Get-Date -Format 'yyyy-MM-dd HH:mm')
     $items = @(
-        @('MiniSS  //  Screenshare Scanner        v3.7', 'White'),
+        @('MiniSS  //  Screenshare Scanner        v3.8', 'White'),
         @('by Senior   |   Senior Academy', 'Magenta'),
         @($Invite, 'Cyan'),
         @('RED = suspicious    order: LOW > MEDIUM > HIGH', 'Gray'),
@@ -768,6 +771,8 @@ if ($Path) {
         ('4|' + (Join-Path $up 'Documents')),
         ('4|' + (Join-Path $up 'curseforge')),
         ('12|' + (Join-Path $env:APPDATA '.minecraft')),
+        ('12|' + (Join-Path $up '.minecraft')),
+        ('8|' + (Join-Path $env:LOCALAPPDATA 'Packages')), 
         ('5|' + (Join-Path $env:APPDATA 'PrismLauncher')),
         ('5|' + (Join-Path $env:APPDATA 'MultiMC')),
         ('5|' + (Join-Path $env:APPDATA 'ModrinthApp')),
@@ -808,7 +813,7 @@ Write-Host ''
 $scanned = 0
 Show-Hud 'INDEX' 'listing files...'
 $indexLines = [SigCore]::Index([string[]]$rootSpecs, [string[]]$skipList,
-                               [string[]]@('.jar', '.zip', '.mrpack', '.rar', '.7z', '.litemod', '.exe', '.dll', '.bat', '.cmd', '.ps1', '.vbs', '.js', '.py', '.json', '.toml', '.cfg', '.conf', '.properties', '.txt', '.fsh', '.vsh', '.glsl', '.frag', '.vert', '.mcmeta'), $maxBytes, [int64]300MB)
+                               [string[]]@('.jar', '.zip', '.mrpack', '.rar', '.7z', '.litemod', '.class', '.java', '.kt', '.kts', '.exe', '.dll', '.bat', '.cmd', '.ps1', '.vbs', '.js', '.py', '.json', '.toml', '.cfg', '.conf', '.properties', '.txt', '.fsh', '.vsh', '.glsl', '.frag', '.vert', '.mcmeta', '.mixins.json'), $maxBytes, [int64]300MB)
 
 $pathList = New-Object 'System.Collections.Generic.List[string]'
 $sizeOf = @{}
@@ -840,7 +845,7 @@ for ($i = 0; $i -lt $total; $i += $chunkSize) {
     foreach ($pth in $paths) {
         $baseName = [IO.Path]::GetFileName($pth)
         $mm = $nameRegex.Match($baseName)
-        $knownClient = [regex]::Match($baseName, '(?i)(wurst|liquidbounce|meteor|doomsday|prestige|vape|raven|sigma|rise|novoline|tenacity|astolfo|impact|jigsaw|bleachhack|aristois|rusherhack|future|inertia|wexside|huzuni|fdp|thunderhack)')
+        $knownClient = [regex]::Match($baseName, '(?i)(wurst|liquidbounce|meteor|doomsday|prestige|vape|raven|sigma|rise|novoline|tenacity|astolfo|impact|jigsaw|bleachhack|aristois|rusherhack|future|inertia|wexside|huzuni|fdp|thunderhack|x.?ray|free.?cam|crystal.?aura|auto.?totem|trigger.?bot|kill.?aura|aim.?assist|scaffold|flight)')
         if ($mm.Success -or $knownClient.Success) {
             $matchedName = if ($mm.Success) { $mm.Groups[2].Value } else { $knownClient.Groups[1].Value }
             $term = '{0} (file name)' -f $matchedName
@@ -1068,7 +1073,7 @@ if ($rows.Count -gt 0) {
 Write-Host ''
 Write-Host '    a match is a lead, not proof - check the path and date first.' -ForegroundColor DarkGray
 Write-Host '    Hidden files are included when accessible; .minecraft libraries, Downloads, Recent, Prefetch and Recycle Bin are checked.' -ForegroundColor DarkGray
-Write-Host '    Bounded class-string scan: JARs in mods/Downloads/Temp; other JARs use names/metadata. Prefetch/Recent are traces, not proof.' -ForegroundColor DarkGray
+Write-Host '    JAR class-string scan: .minecraft (except bulk libraries), mods/resourcepacks/shaderpacks/modpacks, Downloads and Temp. Prefetch/Recent are traces, not proof.' -ForegroundColor DarkGray
 Write-Host "    MiniSS by $Author  |  $Invite" -ForegroundColor Magenta
 Write-Host ''
 
