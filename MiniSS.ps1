@@ -416,15 +416,21 @@ $rows = New-Object System.Collections.Generic.List[object]
 
 function Add-Row {
     # NameT = hits in file name / path, EntT = hits in jar entry names, ConT = hits in code / metadata strings only
-    param($Source, $Name, $Location, [string[]]$NameT = @(), [string[]]$EntT = @(), [string[]]$ConT = @(), $Modified, [bool]$Big = $false, [int]$Bump = 0, [string[]]$Extra = @())
-    $a = @($NameT + $EntT | Select-Object -Unique)                              # structural evidence: the file / class is NAMED like a cheat
-    $b = @($ConT | Where-Object { $a -notcontains $_ } | Select-Object -Unique) # a string inside code is much weaker evidence
-    $As = @($a | Where-Object { (Get-W $_) -ge 3 }); $Am = @($a | Where-Object { (Get-W $_) -eq 2 })
-    $Bs = @($b | Where-Object { (Get-W $_) -ge 3 }); $Bm = @($b | Where-Object { (Get-W $_) -eq 2 })
+    param($Source, $Name, $Location, [string[]]$NameT = @(), [string[]]$EntT = @(), [string[]]$ConT = @(), $Modified, [bool]$Big = $false, [int]$Bump = 0, [string[]]$Extra = @(), [bool]$Zip = $false)
+    $n = @($NameT | Select-Object -Unique)                                         # the FILE itself is named like a cheat
+    $e = @($EntT | Where-Object { $n -notcontains $_ } | Select-Object -Unique)    # a class / package inside is named like a cheat
+    $b = @($ConT | Where-Object { ($n + $e) -notcontains $_ } | Select-Object -Unique)   # only a string inside code: weakest evidence
+    $a = @($n + $e)
+    $As = @($a | Where-Object { (Get-W $_) -ge 3 })
+    $Am = @($n | Where-Object { (Get-W $_) -eq 2 })     # medium terms (xray, freecam, baritone...) count only when the file itself is named like that:
+    $Em = @($e | Where-Object { (Get-W $_) -eq 2 })     # normal mods have FreecamUtil / Baritone-compat classes, so inside a jar they need 2+ different ones
+    $Bs = @($b | Where-Object { (Get-W $_) -ge 3 })
     $weak = @(($a + $b) | Where-Object { (Get-W $_) -le 1 })
-    if ((Get-Units $Bs) -ge 3) { $As += $Bs; $Bs = @() }                               # 3+ different cheat strings in one code base = real cheat code
-    if ($As.Count + $Am.Count + $Bs.Count + $Bm.Count -eq 0 -and -not $ShowWeak) { return }
-    $hot = @($As + $Am + $Bs + $Bm); if ($hot.Count -eq 0) { $hot = $weak; $weak = @() }
+    # 3+ different cheat strings in one jar = real cheat code. Zips (modpacks, backups) hold many mods, so they need 4+
+    if ((Get-Units $Bs) -ge $(if ($Zip) { 4 } else { 3 })) { $As += $Bs; $Bs = @() } elseif ($Zip) { $Bs = @() }
+    $emu = ((Get-Units $Em) -ge 2)
+    if ($As.Count + $Am.Count + $Bs.Count -eq 0 -and -not $emu -and -not $ShowWeak) { return }
+    $hot = @($As + $Am + $Bs); if ($emu) { $hot += $Em }; if ($hot.Count -eq 0) { $hot = $weak; $weak = @() }
 
     if ((Get-Units $As) -ge 2 -or ($As.Count -ge 1 -and $Bs.Count -ge 1)) { $lvl = 2 }
     elseif ($As.Count -ge 1 -or $Am.Count -ge 1 -or (Get-Units $Bs) -ge 2) { $lvl = 1 }
@@ -436,7 +442,7 @@ function Add-Row {
 
     $stamp = ''; if ($Modified) { try { $stamp = ([datetime]$Modified).ToString('yyyy-MM-dd HH:mm') } catch { } }
     $rows.Add([pscustomobject]@{
-        Severity = @('LOW', 'MEDIUM', 'HIGH')[$lvl]; Score = (3 * $As.Count + 2 * ($Am.Count + $Bs.Count) + $Bm.Count); Source = $Source; Name = $Name
+        Severity = @('LOW', 'MEDIUM', 'HIGH')[$lvl]; Score = (3 * $As.Count + 2 * ($Am.Count + $Bs.Count) + $Em.Count); Source = $Source; Name = $Name
         Matches = ($hot -join ', '); Hints = ((@($weak) + $Extra) -join ', '); Modified = $stamp; Location = $Location })
 }
 
@@ -497,7 +503,7 @@ else {
 }
 # folders that never hold what we look for (resourcepacks / logs / crash-reports are NOT skipped on purpose)
 $skipList = @('node_modules', '.git', '__pycache__', 'windows', 'winsxs', 'windowsapps', '$recycle.bin', 'system volume information', 'assets', 'runtime', 'saves', 'natives', 'shaderpacks',
-    'screenshots', 'cache', 'code cache', 'gpucache', 'indexeddb', 'local storage', 'service worker', 'discord', 'whatsapp', 'telegram desktop', 'spotify', 'slack', 'zoom', 'teams', 'microsoft',
+    'screenshots', 'modpack_auto_backup', 'cache', 'code cache', 'gpucache', 'indexeddb', 'local storage', 'service worker', 'discord', 'whatsapp', 'telegram desktop', 'spotify', 'slack', 'zoom', 'teams', 'microsoft',
     'google', 'mozilla', 'opera software', 'brave-browser', 'nvidia', 'nvidia corporation', 'adobe', 'steam', 'steamapps', 'epic games', 'tlauncher', '.tlauncher', 'jetbrains', 'code', 'obs-studio',
     'npm', 'python', 'dotnet', 'nuget')
 if (-not ($Deep -or $Mode -eq 'Full' -or $Path)) { $skipList += 'libraries' }
@@ -536,7 +542,7 @@ for ($i = 0; $i -lt $total; $i += 96) {
         if ($p -match '\\Prefetch\\') { $src = 'Prefetch' } elseif ($p -match '\\Recent\\') { $src = 'Recent' } elseif ($p -match '\$Recycle\.Bin') { $src = 'Recycle (deleted)' } else { $src = 'File' }
         if ($src -like 'Recycle*') { $nm = Get-Orig $p $nm }
         Add-Row -Source $src -Name $nm -Location $p -NameT $nh -EntT $en -ConT $ch -Modified ([IO.File]::GetLastWriteTime($p)) `
-                -Big (([IO.FileInfo]$p).Length -gt 20MB) -Bump ([int]($hid -or $dis)) -Extra $x
+                -Big (([IO.FileInfo]$p).Length -gt 20MB) -Bump ([int]($hid -or $dis)) -Extra $x -Zip ($ext -eq '.zip')
     }
     $scanned += $paths.Count
     $secs = ((Get-Date) - $t0).TotalSeconds
