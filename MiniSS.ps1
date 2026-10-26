@@ -243,6 +243,8 @@ public static class SigCore
     {
         for (int i = 0; i + 1 < len; i++)
         {
+            // Enforce the wall-clock limit inside the matcher, not just between files.
+            if ((i & 16383) == 0 && ScanExpired()) return;
             byte b0 = lower[buf[i]];
             if (!pairOk[(b0 << 8) | lower[buf[i + 1]]]) continue;
             List<int> cand = byFirst[b0];
@@ -313,16 +315,21 @@ public static class SigCore
                                        FileShare.ReadWrite | FileShare.Delete, 4096))
         using (var zip = new ZipArchive(fs, ZipArchiveMode.Read))
         {
+            // Avoid building/sorting unbounded metadata for archives with huge entry counts.
             var sb = new StringBuilder();
+            var scanEntries = new List<ZipArchiveEntry>();
+            int entryCount = 0;
             foreach (ZipArchiveEntry e in zip.Entries)
             {
+                if (ScanExpired() || entryCount >= 2500 || sb.Length >= 512 * 1024) break;
                 sb.Append(e.FullName);
                 sb.Append('\n');
+                scanEntries.Add(e);
+                entryCount++;
             }
             byte[] nb = Encoding.UTF8.GetBytes(sb.ToString());
             Scan(nb, nb.Length, hits);
 
-            var scanEntries = new List<ZipArchiveEntry>(zip.Entries);
             scanEntries.Sort((a, b) => EntryPriority(a.FullName, isZip).CompareTo(EntryPriority(b.FullName, isZip)));
             foreach (ZipArchiveEntry e in scanEntries)
             {
@@ -837,15 +844,15 @@ Write-Host ''
 # 6) Files: fast index (compiled code), then parallel scan
 # ---------------------------------------------------------------------------
 $scanned = 0
-# Hard budget: indexing is limited to ~7 seconds, total file scan to ~26 seconds.
+# Soft wall-clock budgets; inner matcher now checks the scan deadline too. Windows filesystem enumeration can still overrun on a blocked/network path.
 [SigCore]::IndexTimedOut = $false
 [SigCore]::ScanTimedOut = $false
 [SigCore]::ProcessedFiles = 0
-[SigCore]::IndexDeadlineUtcTicks = [DateTime]::UtcNow.AddSeconds(7).Ticks
-[SigCore]::ScanDeadlineUtcTicks = [DateTime]::UtcNow.AddSeconds(26).Ticks
-Show-Hud 'INDEX' 'listing files (7s budget)...'
+[SigCore]::IndexDeadlineUtcTicks = [DateTime]::UtcNow.AddSeconds(6).Ticks
+[SigCore]::ScanDeadlineUtcTicks = [DateTime]::UtcNow.AddSeconds(24).Ticks
+Show-Hud 'INDEX' 'listing files (6s budget)...'
 $indexLines = [SigCore]::Index([string[]]$rootSpecs, [string[]]$skipList,
-                               [string[]]@('.jar', '.zip', '.mrpack', '.litemod', '.class', '.java', '.kt', '.kts', '.exe', '.dll', '.bat', '.cmd', '.ps1', '.vbs', '.js', '.py', '.json', '.toml', '.cfg', '.conf', '.properties', '.txt', '.fsh', '.vsh', '.glsl', '.frag', '.vert', '.mcmeta', '.mixins.json'), $maxBytes, [int64]200MB, 5000, 10000)
+                               [string[]]@('.jar', '.zip', '.mrpack', '.litemod', '.class', '.java', '.kt', '.kts', '.exe', '.dll', '.bat', '.cmd', '.ps1', '.vbs', '.js', '.py', '.json', '.toml', '.cfg', '.conf', '.properties', '.txt', '.fsh', '.vsh', '.glsl', '.frag', '.vert', '.mcmeta', '.mixins.json'), $maxBytes, [int64]200MB, 1800, 3500)
 
 $pathList = New-Object 'System.Collections.Generic.List[string]'
 $sizeOf = @{}
