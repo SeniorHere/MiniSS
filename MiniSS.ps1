@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    MiniSS - Mini ScreenShare scanner (v3.8 - coverage and lightweight Java strings)
+    MiniSS - Mini ScreenShare scanner (v3.9 - bounded scan and signature priority)
     Author : Senior
     Discord: https://discord.gg/95MmttMD6
 
@@ -55,7 +55,7 @@ $Invite = 'https://discord.gg/95MmttMD6'
 $db = @{}
 function Add-Terms {
     param([int]$Weight, [string[]]$List)
-    foreach ($t in $List) { $db[$t] = $Weight }
+    foreach ($t in $List) { if (-not $db.ContainsKey($t) -or [int]$db[$t] -lt $Weight) { $db[$t] = $Weight } }
 }
 
 # Strong: cheat modules
@@ -86,7 +86,7 @@ Add-Terms 3 @(
     'HydraClient', 'Hydra Client', 'XuluClient', 'Xulu Client', 'FluxClient', 'Flux Client',
     'PerishClient', 'Perish Client', 'JexClient', 'Jex Client', 'FrostClient', 'Frost Client',
     'ItamiClient', 'Itami Client', 'PolarClient', 'Polar Client', 'CurseClient', 'Curse Client',
-    'FDPClient', 'FDP Client', 'DopiumClient', 'Dopium Client', 'Dopium'
+    'FDPClient', 'FDP Client', 'DopiumClient', 'Dopium Client', 'Dopium', 'Manthe', 'Manthe Client', 'Whiteout', 'Whiteout Client', 'Pulsive Client', 'AimWhere Client', 'Dream Client'
 )
 # Strong: more well-known cheat clients
 Add-Terms 3 @(
@@ -125,7 +125,7 @@ Add-Terms 1 @(
 
 # Generic client names: matched in FILE NAMES only, and only together with a typical suffix
 # (e.g. "Vape V4.exe", "Sigma Client.jar", "Raven B+.jar", "Impact_loader.exe").
-$genericNames = 'wurst|liquidbounce|meteor|vape|raven|sigma|rise|novoline|tenacity|astolfo|impact|jigsaw|ares|hydra|xulu|flux|perish|jex|frost|itami|polar|curse|fdp|dopium|slinky|doomsday|entropy|drip|exhibition|zeroday|wolfram|inertia|nursultan|celestial|expensive|wexside|akrien|moon|remix|huzuni'
+$genericNames = 'wurst|liquidbounce|meteor|vape|raven|sigma|rise|novoline|tenacity|astolfo|impact|jigsaw|ares|hydra|xulu|flux|perish|jex|frost|itami|polar|curse|fdp|dopium|slinky|doomsday|entropy|drip|exhibition|zeroday|wolfram|inertia|nursultan|celestial|expensive|wexside|akrien|moon|remix|huzuni|whiteout|manthe|aimwhere|pulsive'
 $nameRegex = New-Object System.Text.RegularExpressions.Regex(
     ('(?i)(^|[^a-z0-9])(' + $genericNames + ')[ _\-.]*(client|loader|injector|crack(ed)?|hack(ed)?|cheat|ghost|lite|v\d+(\.\d+)*|b\+{1,2}|\d+(\.\d+)+)([^a-z0-9]|$)'))
 
@@ -145,7 +145,7 @@ $allTerms = [string[]]@($db.Keys)
 # 2) Matching engine (compiled once; works on Windows PowerShell 5.1 and 7)
 #    - case-insensitive, ASCII + UTF-16 strings
 #    - word-boundary aware (so "NoFall" does not match "NoFallback")
-#    - multi-threaded
+#    - single-worker, bounded CPU
 # ---------------------------------------------------------------------------
 if (-not ('SigCore' -as [type])) {
     $csharp = @'
@@ -165,10 +165,17 @@ public static class SigCore
     static bool[] pairOk = new bool[65536];
     static byte[] lower = MakeLower();
     static int longest = 1;
-    const int Chunk = 512 * 1024;
+    const int Chunk = 256 * 1024;
     const long JarBudget = 3L * 1024 * 1024;
-    const long ZipBudget = 2L * 1024 * 1024;
+    const long ZipBudget = 768L * 1024;
     public static bool Deep = false;
+    public static long IndexDeadlineUtcTicks = long.MaxValue;
+    public static long ScanDeadlineUtcTicks = long.MaxValue;
+    public static bool IndexTimedOut = false;
+    public static bool ScanTimedOut = false;
+    public static int ProcessedFiles = 0;
+    static bool IndexExpired() { if (DateTime.UtcNow.Ticks >= IndexDeadlineUtcTicks) { IndexTimedOut = true; return true; } return false; }
+    static bool ScanExpired() { if (DateTime.UtcNow.Ticks >= ScanDeadlineUtcTicks) { ScanTimedOut = true; return true; } return false; }
 
     static byte[] MakeLower()
     {
@@ -279,6 +286,7 @@ public static class SigCore
             int carry = 0, n;
             while ((n = fs.Read(buf, carry, chunk)) > 0)
             {
+                if (ScanExpired()) break;
                 int total = carry + n;
                 Scan(buf, total, hits);
                 carry = Math.Min(longest - 1, total);
@@ -287,7 +295,7 @@ public static class SigCore
         }
     }
 
-    // Jar/zip: entry names + small metadata files; .class contents only with -Deep
+    // Jar/zip: entry names, descriptors, and prioritized bounded class-string scan
     static void ScanJarInto(string path, List<string> hits)
     {
         string archiveExt = Path.GetExtension(path);
@@ -297,9 +305,9 @@ public static class SigCore
         string lowerPath = path.ToLowerInvariant();
         bool inMinecraft = lowerPath.Contains("\\.minecraft\\") || lowerPath.Contains("\\minecraft\\");
         bool inTargetFolder = lowerPath.Contains("\\mods\\") || lowerPath.Contains("\\modpacks\\") || lowerPath.Contains("\\downloads\\") || lowerPath.Contains("\\temp\\") || lowerPath.Contains("\\resourcepacks\\") || lowerPath.Contains("\\shaderpacks\\");
-        // Class constant-pool strings are scanned in mod/download/temp archives and in
-        // Minecraft archives outside the huge vanilla libraries/versions trees.
-        bool inVanillaBulk = lowerPath.Contains("\\libraries\\") || lowerPath.Contains("\\versions\\");
+        // Class constant-pool strings are scanned in targeted archives and Minecraft archives;
+        // the large shared libraries tree is excluded in Quick mode.
+        bool inVanillaBulk = lowerPath.Contains("\\libraries\\");
         bool inspectClasses = !isZip && (deep || inTargetFolder || (inMinecraft && !inVanillaBulk));
         using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
                                        FileShare.ReadWrite | FileShare.Delete, 4096))
@@ -314,14 +322,17 @@ public static class SigCore
             byte[] nb = Encoding.UTF8.GetBytes(sb.ToString());
             Scan(nb, nb.Length, hits);
 
-            foreach (ZipArchiveEntry e in zip.Entries)
+            var scanEntries = new List<ZipArchiveEntry>(zip.Entries);
+            scanEntries.Sort((a, b) => EntryPriority(a.FullName, isZip).CompareTo(EntryPriority(b.FullName, isZip)));
+            foreach (ZipArchiveEntry e in scanEntries)
             {
+                if (ScanExpired()) break;
                 if (budget <= 0) break;
                 if (e.Length == 0) continue;
                 string n = e.FullName.ToLowerInvariant();
                 // Some modpack/resource archives contain nested JARs. Inspect a bounded
                 // amount of their class constant-pool strings without extracting to disk.
-                if (isZip && n.EndsWith(".jar", StringComparison.Ordinal) && e.Length <= 20L * 1024 * 1024)
+                if (isZip && n.EndsWith(".jar", StringComparison.Ordinal) && e.Length <= 4L * 1024 * 1024)
                 {
                     try
                     {
@@ -334,9 +345,9 @@ public static class SigCore
                             {
                                 foreach (ZipArchiveEntry ce in nestedZip.Entries)
                                 {
-                                    if (budget <= 0) break;
+                                    if (ScanExpired() || budget <= 0) break;
                                     string cn = ce.FullName.ToLowerInvariant();
-                                    if (!cn.EndsWith(".class", StringComparison.Ordinal) || ce.Length <= 0 || ce.Length > 512 * 1024) continue;
+                                    if (!cn.EndsWith(".class", StringComparison.Ordinal) || ce.Length <= 0 || ce.Length > 256 * 1024) continue;
                                     if (ce.Length > budget) continue;
                                     budget -= ce.Length;
                                     using (Stream cs = ce.Open())
@@ -361,10 +372,10 @@ public static class SigCore
                              || n.EndsWith(".mixins.json", StringComparison.Ordinal));
                 // Scan class constant-pool strings by default in likely cheat locations.
                 // Strict per-entry and per-archive budgets keep CPU/RAM use bounded.
-                bool cls = inspectClasses && e.Length <= 1024 * 1024 && n.EndsWith(".class", StringComparison.Ordinal);
+                bool cls = inspectClasses && e.Length <= 256 * 1024 && n.EndsWith(".class", StringComparison.Ordinal);
                 // Resource/shader packs often hide their useful content in GLSL source,
                 // properties, JSON and mcmeta files, not just pack.mcmeta.
-                bool packContent = isZip && e.Length <= 512 * 1024 &&
+                bool packContent = isZip && e.Length <= 256 * 1024 &&
                             (n.EndsWith("pack.mcmeta", StringComparison.Ordinal) ||
                              n.EndsWith(".txt", StringComparison.Ordinal) ||
                              n.EndsWith(".json", StringComparison.Ordinal) ||
@@ -391,8 +402,17 @@ public static class SigCore
         }
     }
 
-    // Fast file index. roots look like "depth|path". Returns lines: path <TAB> size <TAB> lastWriteTicks
-    public static string[] Index(string[] roots, string[] skipNames, string[] exts, long maxBytes, long maxArchiveBytes)
+    static int EntryPriority(string name, bool isZip)
+    {
+        string n = name.ToLowerInvariant();
+        if (!isZip && n.EndsWith(".class", StringComparison.Ordinal)) return 0;
+        if (n.EndsWith("mods.toml", StringComparison.Ordinal) || n.EndsWith("mcmod.info", StringComparison.Ordinal) || n.EndsWith("mod.json", StringComparison.Ordinal) || n.EndsWith("manifest.mf", StringComparison.Ordinal) || n.EndsWith(".mixins.json", StringComparison.Ordinal)) return 1;
+        if (isZip && (n.EndsWith(".json", StringComparison.Ordinal) || n.EndsWith(".txt", StringComparison.Ordinal) || n.EndsWith(".glsl", StringComparison.Ordinal) || n.EndsWith(".fsh", StringComparison.Ordinal) || n.EndsWith(".vsh", StringComparison.Ordinal))) return 0;
+        return 2;
+    }
+
+    // Fast bounded index. Roots are prioritized; returns path, size and timestamp.
+    public static string[] Index(string[] roots, string[] skipNames, string[] exts, long maxBytes, long maxArchiveBytes, int maxFiles, int maxDirs)
     {
         var skip = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         foreach (string s in skipNames) skip[s] = true;
@@ -428,6 +448,7 @@ public static class SigCore
         int head = 0;
         while (head < dirs.Count)
         {
+            if (IndexExpired() || results.Count >= maxFiles || head >= maxDirs) { IndexTimedOut = true; break; }
             string dir = dirs[head];
             int left = depths[head];
             head++;
@@ -442,8 +463,10 @@ public static class SigCore
                 {
                     foreach (string sub in Directory.EnumerateDirectories(dir))
                     {
+                        if (IndexExpired() || dirs.Count >= maxDirs) { IndexTimedOut = true; break; }
                         string leaf = Path.GetFileName(sub);
-                        if (skip.ContainsKey(leaf)) continue;
+                        bool isPackAssets = leaf.Equals("assets", StringComparison.OrdinalIgnoreCase) && dir.IndexOf("\\resourcepacks\\", StringComparison.OrdinalIgnoreCase) >= 0;
+                        if (skip.ContainsKey(leaf) && !isPackAssets) continue;
                         try
                         {
                             FileAttributes attr = File.GetAttributes(sub);
@@ -461,13 +484,14 @@ public static class SigCore
             {
                 foreach (string f in Directory.EnumerateFiles(dir))
                 {
+                    if (IndexExpired() || results.Count >= maxFiles) break;
                     string fe = Path.GetExtension(f);
                     bool recycleData = f.IndexOf("\\$Recycle.Bin\\", StringComparison.OrdinalIgnoreCase) >= 0;
                     // Recycle Bin stores original filenames in extensionless $I/$R files.
                     if (fe.Length == 0 ? !recycleData : !ext.ContainsKey(fe)) continue;
                     var fi = new FileInfo(f);
                     long len = fi.Length;
-                    bool archive = fe.Equals(".jar", StringComparison.OrdinalIgnoreCase) || fe.Equals(".zip", StringComparison.OrdinalIgnoreCase) || fe.Equals(".mrpack", StringComparison.OrdinalIgnoreCase);
+                    bool archive = fe.Equals(".jar", StringComparison.OrdinalIgnoreCase) || fe.Equals(".zip", StringComparison.OrdinalIgnoreCase) || fe.Equals(".mrpack", StringComparison.OrdinalIgnoreCase) || fe.Equals(".litemod", StringComparison.OrdinalIgnoreCase);
                     long limit = archive ? maxArchiveBytes : maxBytes;
                     if (len <= 0 || len > limit) continue;
                     results.Add(f + "\t" + len.ToString() + "\t" + fi.LastWriteTime.Ticks.ToString());
@@ -486,6 +510,7 @@ public static class SigCore
         opts.MaxDegreeOfParallelism = 1;
         Parallel.ForEach(paths, opts, path =>
         {
+            if (ScanExpired()) return;
             try
             {
                 var nameHits = new List<string>();
@@ -495,19 +520,20 @@ public static class SigCore
                 string ext = Path.GetExtension(path).ToLowerInvariant();
                 try
                 {
-                    if (ext == ".jar" || ext == ".zip" || ext == ".mrpack")
+                    if (ext == ".jar" || ext == ".zip" || ext == ".mrpack" || ext == ".litemod")
                     {
                         string lp = path.ToLowerInvariant();
-                        bool inMcTarget = lp.Contains("\\.minecraft\\mods\\") || lp.Contains("\\.minecraft\\resourcepacks\\") || lp.Contains("\\.minecraft\\shaderpacks\\") || lp.Contains("\\.minecraft\\modpacks\\") || lp.Contains("\\.minecraft\\versions\\");
+                        bool inMcTarget = lp.Contains("\\.minecraft\\mods\\") || lp.Contains("\\.minecraft\\resourcepacks\\") || lp.Contains("\\.minecraft\\shaderpacks\\") || lp.Contains("\\.minecraft\\modpacks\\") || lp.Contains("\\.minecraft\\versions\\") || lp.Contains("\\downloads\\");
                         bool inMinecraftTree = lp.Contains("\\.minecraft\\") || lp.Contains("\\minecraft\\");
-                        // Inspect archive contents throughout .minecraft, but vanilla libraries/versions only get metadata/name checks to avoid a large slowdown.
-                        bool likely = (inMinecraftTree && !lp.Contains("\\libraries\\")) || inMcTarget || lp.Contains("\\downloads\\") || lp.Contains("\\temp\\") || lp.Contains("\\$recycle.bin\\") || lp.Contains("\\recent\\");
-                        // Avoid decompressing hundreds of ordinary game libraries in Quick mode.
+                        // Inspect Minecraft archives except shared libraries; class scanning is budgeted per archive.
+                        bool likely = (inMinecraftTree && !lp.Contains("\\libraries\\")) || inMcTarget || lp.Contains("\\temp\\") || lp.Contains("\\$recycle.bin\\") || lp.Contains("\\recent\\");
+                        // Shared libraries are skipped in Quick mode to avoid decompressing hundreds of dependencies.
                         if (likely || Deep || ext == ".mrpack") ScanJarInto(path, contentHits);
                     }
                     else ScanFileInto(path, contentHits);
                 }
                 catch (Exception) { }
+                System.Threading.Interlocked.Increment(ref ProcessedFiles);
                 if (nameHits.Count > 0 || contentHits.Count > 0)
                 {
                     string line = path + "\t" + string.Join(",", nameHits.ToArray()) + "\t" + string.Join(",", contentHits.ToArray());
@@ -586,7 +612,7 @@ function Show-Banner {
     $pw = 56
     $host1 = 'host {0}   |   {1}' -f $env:COMPUTERNAME, (Get-Date -Format 'yyyy-MM-dd HH:mm')
     $items = @(
-        @('MiniSS  //  Screenshare Scanner        v3.8', 'White'),
+        @('MiniSS  //  Screenshare Scanner        v3.9', 'White'),
         @('by Senior   |   Senior Academy', 'Magenta'),
         @($Invite, 'Cyan'),
         @('RED = suspicious    order: LOW > MEDIUM > HIGH', 'Gray'),
@@ -690,7 +716,7 @@ function Add-Row {
     # module is LOW; stronger individual modules are MEDIUM; multiple independent
     # strong signals can raise a result. Names are only leads, not proof.
     $evidenceText = ([string]$Name + ' ' + ($Terms -join ' '))
-    $fullClientRegex = '(?i)(^|[^a-z0-9])(wurst(client)?|liquidbounce( nextgen)?|meteor(client)?|doomsday(client)?|prestige(client)?|vape( v?[34]| lite|client)?|raven( b\+{1,2}|client)?|sigma( client|\s*5(\.0)?)?|rise(client)?|novoline(client)?|tenacity(client)?|astolfo(client)?|impact(client)?|jigsaw(client)?|bleachhack|aristois|rusherhack|future(client)?|inertia(client)?|wexside|huzuni|fdp(client)?|thunderhack)([^a-z0-9]|$)'
+    $fullClientRegex = '(?i)(^|[^a-z0-9])(wurst(client)?|liquidbounce( nextgen)?|meteor(client)?|doomsday(client)?|prestige(client)?|vape( v?[34]| lite|client)?|raven( b\+{1,2}|client)?|sigma( client|\s*5(\.0)?)?|rise(client)?|novoline(client)?|tenacity(client)?|astolfo(client)?|impact(client)?|jigsaw(client)?|bleachhack|aristois|rusherhack|future(client)?|inertia(client)?|wexside|huzuni|fdp(client)?|thunderhack|whiteout(client)?|manthe(client)?|aimwhere(client)?|pulsive(client)?|entropy(client)?|drip(client)?|exhibition(client)?)([^a-z0-9]|$)'
     $isFullClient = ($evidenceText -match $fullClientRegex)
     $singleLightModule = ($strongCount -eq 1 -and (($Terms -join ' ') -match '(?i)\b(Freecam|FreeCamera|FullBright|Fullbright)\b'))
 
@@ -761,7 +787,7 @@ if ($Path) {
     $modeName = 'Full'
 } else {
     $rootSpecs = @(
-        ('12|' + (Join-Path $up 'Downloads')),
+        ('5|' + (Join-Path $up 'Downloads')),
         ('12|' + (Join-Path $env:APPDATA 'Microsoft\Windows\Recent')),
         ('12|' + (Join-Path $env:SystemRoot 'Prefetch')),
         ('5|' + (Join-Path $env:LOCALAPPDATA 'Temp')),
@@ -770,14 +796,14 @@ if ($Path) {
         ('5|' + (Join-Path $up 'Desktop')),
         ('4|' + (Join-Path $up 'Documents')),
         ('4|' + (Join-Path $up 'curseforge')),
-        ('12|' + (Join-Path $env:APPDATA '.minecraft')),
-        ('12|' + (Join-Path $up '.minecraft')),
-        ('8|' + (Join-Path $env:LOCALAPPDATA 'Packages')), 
+        ('8|' + (Join-Path $env:APPDATA '.minecraft')),
+        ('8|' + (Join-Path $up '.minecraft')),
+        ('2|' + (Join-Path $env:LOCALAPPDATA 'Packages')), 
         ('5|' + (Join-Path $env:APPDATA 'PrismLauncher')),
         ('5|' + (Join-Path $env:APPDATA 'MultiMC')),
         ('5|' + (Join-Path $env:APPDATA 'ModrinthApp')),
         ('5|' + (Join-Path $env:APPDATA 'com.modrinth.theseus')),
-        ('12|' + $env:TEMP),
+        ('4|' + $env:TEMP),
         ('8|' + (Join-Path $env:LOCALAPPDATA 'Temp')),
         ('4|' + (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup')),
         ('4|' + (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Startup')),
@@ -797,7 +823,7 @@ $skipList = @(
     'nvidia corporation', 'adobe', 'steam', 'steamapps', 'epic games', 'tlauncher', '.tlauncher',
     'jetbrains', 'code', 'obs-studio', 'npm', 'python', 'dotnet', 'nuget'
 )
-# Targeted archives get bounded class-string scanning; vanilla libraries/versions avoid expensive class scans unless -Deep is supplied.
+# Targeted archives use bounded class-first scanning; library archives remain excluded from class-content scans in Quick mode.
 
 $maxBytes = [int64]$MaxSizeMB * 1MB
 
@@ -811,9 +837,15 @@ Write-Host ''
 # 6) Files: fast index (compiled code), then parallel scan
 # ---------------------------------------------------------------------------
 $scanned = 0
-Show-Hud 'INDEX' 'listing files...'
+# Hard budget: indexing is limited to ~7 seconds, total file scan to ~26 seconds.
+[SigCore]::IndexTimedOut = $false
+[SigCore]::ScanTimedOut = $false
+[SigCore]::ProcessedFiles = 0
+[SigCore]::IndexDeadlineUtcTicks = [DateTime]::UtcNow.AddSeconds(7).Ticks
+[SigCore]::ScanDeadlineUtcTicks = [DateTime]::UtcNow.AddSeconds(26).Ticks
+Show-Hud 'INDEX' 'listing files (7s budget)...'
 $indexLines = [SigCore]::Index([string[]]$rootSpecs, [string[]]$skipList,
-                               [string[]]@('.jar', '.zip', '.mrpack', '.rar', '.7z', '.litemod', '.class', '.java', '.kt', '.kts', '.exe', '.dll', '.bat', '.cmd', '.ps1', '.vbs', '.js', '.py', '.json', '.toml', '.cfg', '.conf', '.properties', '.txt', '.fsh', '.vsh', '.glsl', '.frag', '.vert', '.mcmeta', '.mixins.json'), $maxBytes, [int64]300MB)
+                               [string[]]@('.jar', '.zip', '.mrpack', '.litemod', '.class', '.java', '.kt', '.kts', '.exe', '.dll', '.bat', '.cmd', '.ps1', '.vbs', '.js', '.py', '.json', '.toml', '.cfg', '.conf', '.properties', '.txt', '.fsh', '.vsh', '.glsl', '.frag', '.vert', '.mcmeta', '.mixins.json'), $maxBytes, [int64]200MB, 5000, 10000)
 
 $pathList = New-Object 'System.Collections.Generic.List[string]'
 $sizeOf = @{}
@@ -829,7 +861,7 @@ $total = $pathList.Count
 $scanStart = Get-Date
 $chunkSize = 64
 
-for ($i = 0; $i -lt $total; $i += $chunkSize) {
+for ($i = 0; $i -lt $total -and -not [SigCore]::ScanTimedOut; $i += $chunkSize) {
     $n     = [math]::Min($chunkSize, $total - $i)
     $paths = $pathList.GetRange($i, $n).ToArray()
 
@@ -845,7 +877,7 @@ for ($i = 0; $i -lt $total; $i += $chunkSize) {
     foreach ($pth in $paths) {
         $baseName = [IO.Path]::GetFileName($pth)
         $mm = $nameRegex.Match($baseName)
-        $knownClient = [regex]::Match($baseName, '(?i)(wurst|liquidbounce|meteor|doomsday|prestige|vape|raven|sigma|rise|novoline|tenacity|astolfo|impact|jigsaw|bleachhack|aristois|rusherhack|future|inertia|wexside|huzuni|fdp|thunderhack|x.?ray|free.?cam|crystal.?aura|auto.?totem|trigger.?bot|kill.?aura|aim.?assist|scaffold|flight)')
+        $knownClient = [regex]::Match($baseName, '(?i)(wurst|liquidbounce|meteor|doomsday|prestige|vape|raven|sigma|rise|novoline|tenacity|astolfo|impact|jigsaw|bleachhack|aristois|rusherhack|future|inertia|wexside|huzuni|fdp|thunderhack|whiteout|manthe|aimwhere|pulsive|entropy|drip|exhibition|x.?ray|free.?cam|crystal.?aura|auto.?totem|trigger.?bot|kill.?aura|aim.?assist|scaffold|flight)')
         if ($mm.Success -or $knownClient.Success) {
             $matchedName = if ($mm.Success) { $mm.Groups[2].Value } else { $knownClient.Groups[1].Value }
             $term = '{0} (file name)' -f $matchedName
@@ -873,8 +905,8 @@ for ($i = 0; $i -lt $total; $i += $chunkSize) {
         Add-Row -Source 'File' -Name $name -Location $path -Terms $all.ToArray() -Modified $when -NameHit $hasName -Big ($sizeOf[$path] -gt 20MB)
     }
 
-    $scanned += $n
-    $pct  = $scanned / $total
+    $scanned = [SigCore]::ProcessedFiles
+    $pct  = [math]::Min(1, $scanned / [math]::Max(1, $total))
     $secs = ((Get-Date) - $scanStart).TotalSeconds
     $etaS = 0
     if ($scanned -gt 0) { $etaS = $secs * ($total - $scanned) / $scanned }
@@ -887,6 +919,7 @@ for ($i = 0; $i -lt $total; $i += $chunkSize) {
 # ---------------------------------------------------------------------------
 Show-Hud 'PROCS' 'running processes'
 foreach ($p in Get-Process) {
+    if ([DateTime]::UtcNow.Ticks -ge [SigCore]::ScanDeadlineUtcTicks) { [SigCore]::ScanTimedOut = $true; break }
     $hit = [SigCore]::ScanText("$($p.ProcessName) $($p.MainWindowTitle)")
     if ($hit.Count -gt 0) {
         Add-Row -Source 'Process' -Name $p.ProcessName -Location ("PID $($p.Id) | $($p.MainWindowTitle)") -Terms $hit -Modified $null -NameHit $true
@@ -902,9 +935,11 @@ $traceSources = @(
     @{ Label = 'Recent';   Dir = (Join-Path $env:APPDATA 'Microsoft\Windows\Recent');       Pattern = '*.lnk' }
 )
 foreach ($src in $traceSources) {
+    if ([DateTime]::UtcNow.Ticks -ge [SigCore]::ScanDeadlineUtcTicks) { [SigCore]::ScanTimedOut = $true; break }
     if (-not (Test-Path -LiteralPath $src.Dir)) { continue }
     try {
         foreach ($full in [IO.Directory]::EnumerateFiles($src.Dir, $src.Pattern)) {
+            if ([DateTime]::UtcNow.Ticks -ge [SigCore]::ScanDeadlineUtcTicks) { [SigCore]::ScanTimedOut = $true; break }
             $nm  = [IO.Path]::GetFileName($full)
             $hit = @([SigCore]::ScanText($nm))
             if ($hit.Count -eq 0) {
@@ -927,6 +962,7 @@ foreach ($src in $traceSources) {
         try {
             $shell = New-Object -ComObject WScript.Shell
             foreach ($full in [IO.Directory]::EnumerateFiles($src.Dir, '*.lnk')) {
+                if ([DateTime]::UtcNow.Ticks -ge [SigCore]::ScanDeadlineUtcTicks) { [SigCore]::ScanTimedOut = $true; break }
                 try {
                     $shortcut = $shell.CreateShortcut($full)
                     $targetText = [string]$shortcut.TargetPath + ' ' + [string]$shortcut.Arguments
@@ -949,6 +985,7 @@ foreach ($src in $traceSources) {
     if ($src.Label -eq 'Prefetch') {
         try {
             foreach ($full in [IO.Directory]::EnumerateFiles($src.Dir, '*.pf')) {
+                if ([DateTime]::UtcNow.Ticks -ge [SigCore]::ScanDeadlineUtcTicks) { [SigCore]::ScanTimedOut = $true; break }
                 try {
                     $fi = New-Object IO.FileInfo($full)
                     if ($fi.Length -le 0 -or $fi.Length -gt 8MB) { continue }
@@ -1005,6 +1042,7 @@ $meter  = ($full * $cells) + ($empty * (24 - $cells))
 if ($high -gt 0)    { $tColor = 'Red';    $verdict = 'SUSPICIOUS - cheat signatures found' }
 elseif ($med -gt 0) { $tColor = 'Yellow'; $verdict = 'REVIEW NEEDED - possible cheat traces' }
 elseif ($low -gt 0) { $tColor = 'Green';  $verdict = 'PROBABLY CLEAN - minor hints only' }
+elseif ([SigCore]::IndexTimedOut -or [SigCore]::ScanTimedOut) { $tColor = 'Yellow'; $verdict = 'INCOMPLETE - time budget reached; not a clean verdict' }
 else                { $tColor = 'Green';  $verdict = 'CLEAN - nothing suspicious found' }
 
 Write-Host ''
@@ -1031,6 +1069,7 @@ if ($tally.Count -gt 0) {
     Write-Host ($topList -join '  |  ') -ForegroundColor Red
 }
 Write-Host ('    scanned {0} files in {1:n0}s' -f $scanned, $elapsed.TotalSeconds) -ForegroundColor DarkGray
+if ([SigCore]::IndexTimedOut -or [SigCore]::ScanTimedOut) { Write-Host '    time budget reached: scan is partial; do NOT treat no hits as proof of clean.' -ForegroundColor Yellow }
 
 # ---- reports (CSV + HTML) ----
 if ($rows.Count -gt 0) {
