@@ -38,6 +38,8 @@ $db = @{}; $clientSet = @{}
 function Add-Terms { param([int]$Weight, [string]$List, [switch]$Client) foreach ($t in ($List -split '[,\r\n]+')) { $t = $t.Trim(); if ($t) { $db[$t] = $Weight; if ($Client) { $clientSet[$t] = 1 } } } }
 # brand of a client term ("Vape V4", "VapeLite", "vape.gg" -> vape): a scanner / wordlist mentions many brands, a real cheat only its own
 function Get-Brand { param($t) ($t.ToLower() -replace '[^a-z0-9]', '' -replace '(client|v\d+|lite|gg|plus|\d+)+$', '') }
+# number of DIFFERENT things ("Meteor Client" + "meteor-client" + "Auto-Totem" + "AutoTotem" = 2, not 4)
+function Get-Units { param($l) @(@($l) | Where-Object { $_ } | ForEach-Object { Get-Brand $_ } | Select-Object -Unique).Count }
 function Get-W { param($t) $w = $db[$t]; if ($w) { $w } else { 1 } }
 
 Add-Terms 3 'AutoTotem, Auto Totem, Auto_Totem, Auto-Totem, InventoryTotem, InvTotem, AutoInventoryTotem, TotemHit, TotemSwap, AutoCrystal, CrystalAura, OneHitCrystal, CrystalOptimizer, FastCrystal, AutoHitCrystal,
@@ -93,7 +95,7 @@ public static class SigCore
     static int longest = 1;
     public static bool Deep = false;
     public static Regex NameRx = null;
-    static readonly string[] Lib = { "com/google/", "org/apache/", "io/netty/", "org/lwjgl/", "kotlin/", "kotlinx/", "it/unimi/", "org/objectweb/", "org/slf4j/", "com/sun/", "javax/", "org/jetbrains/", "org/intellij/", "com/mojang/", "org/joml/", "net/minecraft/", "net/minecraftforge/", "net/fabricmc/", "net/neoforged/", "org/spongepowered/" };
+    static readonly string[] Lib = { "com/google/", "org/apache/", "io/netty/", "org/lwjgl/", "kotlin/", "kotlinx/", "it/unimi/", "org/objectweb/", "org/slf4j/", "com/sun/", "javax/", "org/jetbrains/", "org/intellij/", "com/mojang/", "org/joml/", "net/minecraft/", "net/minecraftforge/", "net/fabricmc/", "net/neoforged/", "org/spongepowered/", "com/viaversion/", "net/raphimc/", "net/lenni0451/", "org/geysermc/", "org/cloudburstmc/", "com/github/steveice10/", "net/kyori/", "com/fasterxml/", "org/yaml/", "org/json/", "com/electronwill/", "org/bouncycastle/", "net/bytebuddy/", "org/checkerframework/", "ch/qos/", "org/tomlj/", "org/quiltmc/", "org/ow2/", "de/florianmichael/viafabricplus/", "de/florianmichael/vialoadingbase/" };
     static readonly string[] MetaExt = { ".json", ".yml", ".yaml", ".toml", ".info", ".mf", ".mcmeta", ".properties", ".cfg" };
     static readonly string[] Block = { "block/stone.png", "block/dirt.png", "block/netherrack.png", "block/deepslate.png", "block/cobblestone.png" };
     static readonly string[] Txt = { ".exe", ".dll", ".bat", ".cmd", ".ahk", ".lnk", ".txt" };
@@ -123,7 +125,7 @@ public static class SigCore
         pats = p.ToArray(); tags = t.ToArray(); wide = w.ToArray();
     }
 
-    static bool Boundary(byte[] buf, int start, int plen, int len, int step)
+    static bool Boundary(byte[] buf, int start, int plen, int len, int step, bool strict)
     {
         bool firstUpper = buf[start] >= 65 && buf[start] <= 90;
         int pi = start - step;
@@ -131,7 +133,7 @@ public static class SigCore
         {
             byte pb = buf[pi];
             if (step == 2 && buf[pi + 1] != 0) pb = 0;
-            if (((pb >= 65 && pb <= 90) || (pb >= 97 && pb <= 122)) && !firstUpper) return false;
+            if (((pb >= 65 && pb <= 90) || (pb >= 97 && pb <= 122)) && (strict || !firstUpper)) return false;
         }
         int ni = start + plen;
         if (ni + step <= len)
@@ -143,7 +145,7 @@ public static class SigCore
         return true;
     }
 
-    static void Scan(byte[] buf, int len, List<string> hits, bool w)
+    static void Scan(byte[] buf, int len, List<string> hits, bool w, bool strict = false)
     {
         for (int i = 0; i + 1 < len; i++)
         {
@@ -159,7 +161,7 @@ public static class SigCore
                 if (i + p.Length > len || hits.Contains(tags[k])) continue;
                 int j = 1;
                 while (j < p.Length && lower[buf[i + j]] == p[j]) j++;
-                if (j == p.Length && Boundary(buf, i, p.Length, len, wide[k] ? 2 : 1)) hits.Add(tags[k]);
+                if (j == p.Length && Boundary(buf, i, p.Length, len, wide[k] ? 2 : 1, strict)) hits.Add(tags[k]);
             }
         }
     }
@@ -196,12 +198,12 @@ public static class SigCore
             foreach (ZipArchiveEntry e in zip.Entries)
             {
                 string ln = e.FullName.ToLowerInvariant();
-                sb.Append(e.FullName).Append('\n');
+                if (!Pfx(ln, Lib)) sb.Append(e.FullName).Append('\n');
                 if (e.Length > 0 && e.Length < 110 && Has(ln, Block)) tp++;
                 if (!ac) foreach (string a in Ac) if (ln.IndexOf(a, StringComparison.Ordinal) >= 0) { ac = true; break; }
             }
             byte[] nb = Encoding.UTF8.GetBytes(sb.ToString());
-            Scan(nb, nb.Length, ent, false);
+            Scan(nb, nb.Length, ent, false, true);
             if (tp >= 2) ent.Add("xray-pack (transparent blocks)");
             if (ac && !ent.Contains("#anticheat")) ent.Add("#anticheat");   // anti-cheat plugins list cheat names on purpose
             foreach (ZipArchiveEntry e in zip.Entries)
@@ -210,7 +212,7 @@ public static class SigCore
                 long L = e.Length; if (L == 0) continue;
                 string n = e.FullName.ToLowerInvariant();
                 bool cls = L <= 2097152 && n.EndsWith(".class", StringComparison.Ordinal) && !Pfx(n, Lib);
-                bool meta = !cls && L <= 262144 && Has(n, MetaExt);
+                bool meta = !cls && L <= 262144 && Has(n, MetaExt) && !Pfx(n, Lib) && !n.StartsWith("assets/", StringComparison.Ordinal) && !n.StartsWith("data/", StringComparison.Ordinal);
                 bool nest = !cls && !meta && depth < 1 && L <= 16777216 && n.EndsWith(".jar", StringComparison.Ordinal);
                 if (!cls && !meta && !nest) continue;
                 budget -= L;
@@ -420,12 +422,12 @@ function Add-Row {
     $As = @($a | Where-Object { (Get-W $_) -ge 3 }); $Am = @($a | Where-Object { (Get-W $_) -eq 2 })
     $Bs = @($b | Where-Object { (Get-W $_) -ge 3 }); $Bm = @($b | Where-Object { (Get-W $_) -eq 2 })
     $weak = @(($a + $b) | Where-Object { (Get-W $_) -le 1 })
-    if ($Bs.Count -ge 3) { $As += $Bs; $Bs = @() }                               # 3+ different cheat strings in one code base = real cheat code
+    if ((Get-Units $Bs) -ge 3) { $As += $Bs; $Bs = @() }                               # 3+ different cheat strings in one code base = real cheat code
     if ($As.Count + $Am.Count + $Bs.Count + $Bm.Count -eq 0 -and -not $ShowWeak) { return }
     $hot = @($As + $Am + $Bs + $Bm); if ($hot.Count -eq 0) { $hot = $weak; $weak = @() }
 
-    if ($As.Count -ge 2 -or ($As.Count -ge 1 -and ($Am.Count + $Bs.Count + $Bm.Count) -ge 1)) { $lvl = 2 }
-    elseif ($As.Count -eq 1 -or $Am.Count -ge 1 -or $Bs.Count -ge 2) { $lvl = 1 }
+    if ((Get-Units $As) -ge 2 -or ($As.Count -ge 1 -and $Bs.Count -ge 1)) { $lvl = 2 }
+    elseif ($As.Count -ge 1 -or $Am.Count -ge 1 -or (Get-Units $Bs) -ge 2) { $lvl = 1 }
     else { $lvl = 0 }
     if ($Big -and $a.Count -eq 0 -and $lvl -eq 1) { $lvl = 0 }                   # hits only inside a big binary
     if ($As.Count -ge 1) { $lvl = [math]::Min(2, $lvl + $Bump) }                 # hidden / disguised file
@@ -441,7 +443,7 @@ function Add-Row {
 # one card per thing: the same file in many folders / Recent / Prefetch / Recycle Bin is merged into a single row
 function Merge-Rows {
     $lv = @{ LOW = 0; MEDIUM = 1; HIGH = 2 }
-    $key = { if ($_.Source -eq 'Process') { 'p|' + $_.Name } else { $_.Name.ToLower() -replace '\.lnk$', '' -replace '-[0-9a-f]{8}\.pf$', '' -replace '\.pf$', '' } }
+    $key = { if ($_.Source -eq 'Process') { 'p|' + $_.Name } else { $_.Name.ToLower() -replace '\.lnk$', '' -replace '-[0-9a-f]{8}\.pf$', '' -replace '\.pf$', '' -replace '\d+', '#' } }
     @($rows | Group-Object $key | ForEach-Object {
         $g = @($_.Group | Sort-Object @{ Expression = { $lv[$_.Severity] }; Descending = $true }, @{ Expression = { $_.Score }; Descending = $true }); $t = $g[0]
         [pscustomobject]@{
