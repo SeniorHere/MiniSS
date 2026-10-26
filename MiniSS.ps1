@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    MiniSS - Mini ScreenShare scanner (v3.4 - improved detection and severity)
+    MiniSS - Mini ScreenShare scanner (v3.5 - coverage and name matching fix)
     Author : Senior
     Discord: https://discord.gg/95MmttMD6
 
@@ -74,7 +74,7 @@ Add-Terms 3 @(
 )
 # Strong: cheat clients (distinctive names)
 Add-Terms 3 @(
-    'Wurst', 'WurstClient', 'Wurst Client', 'Wurst-Client', 'WurstMC',
+    'Wurst', 'WurstClient', 'Wurst Client', 'Wurst-Client', 'WurstMC', 'Prestige', 'Doomsday Client', 'DoomsdayClient',
     'LiquidBounce', 'LiquidBounce Nextgen', 'LiquidBounce-Nextgen', 'meteordevelopment', 'meteor-client', 'MeteorClient', 'Meteor Client',
     'OringoClient', 'Oringo Client', 'Dortware', 'Dortware Client', 'Asteria Client', 'AsteriaClient',
     'Haruka Client', 'HarukaClient', 'Augustus Client', 'AugustusClient', 'Vega Client', 'VegaClient',
@@ -401,10 +401,12 @@ public static class SigCore
                 foreach (string f in Directory.EnumerateFiles(dir))
                 {
                     string fe = Path.GetExtension(f);
-                    if (fe.Length == 0 || !ext.ContainsKey(fe)) continue;
+                    bool recycleData = f.IndexOf("\\$Recycle.Bin\\", StringComparison.OrdinalIgnoreCase) >= 0;
+                    // Recycle Bin stores original filenames in extensionless $I/$R files.
+                    if (fe.Length == 0 ? !recycleData : !ext.ContainsKey(fe)) continue;
                     var fi = new FileInfo(f);
                     long len = fi.Length;
-                    bool archive = fe.Equals(".jar", StringComparison.OrdinalIgnoreCase) || fe.Equals(".zip", StringComparison.OrdinalIgnoreCase);
+                    bool archive = fe.Equals(".jar", StringComparison.OrdinalIgnoreCase) || fe.Equals(".zip", StringComparison.OrdinalIgnoreCase) || fe.Equals(".mrpack", StringComparison.OrdinalIgnoreCase);
                     long limit = archive ? maxArchiveBytes : maxBytes;
                     if (len <= 0 || len > limit) continue;
                     results.Add(f + "\t" + len.ToString() + "\t" + fi.LastWriteTime.Ticks.ToString());
@@ -616,7 +618,7 @@ function Add-Row {
     # module is LOW; stronger individual modules are MEDIUM; multiple independent
     # strong signals can raise a result. Names are only leads, not proof.
     $evidenceText = ([string]$Name + ' ' + ($Terms -join ' '))
-    $fullClientRegex = '(?i)(^|[^a-z0-9])(wurst(client)?|liquidbounce( nextgen)?|meteor(client)?|vape( v?[34]| lite|client)?|raven( b\+{1,2}|client)?|sigma( client|\s*5(\.0)?)?|rise(client)?|novoline(client)?|tenacity(client)?|astolfo(client)?|impact(client)?|jigsaw(client)?|bleachhack|aristois|rusherhack|future(client)?|inertia(client)?|wexside|huzuni|fdp(client)?|thunderhack)([^a-z0-9]|$)'
+    $fullClientRegex = '(?i)(^|[^a-z0-9])(wurst(client)?|liquidbounce( nextgen)?|meteor(client)?|doomsday(client)?|prestige(client)?|vape( v?[34]| lite|client)?|raven( b\+{1,2}|client)?|sigma( client|\s*5(\.0)?)?|rise(client)?|novoline(client)?|tenacity(client)?|astolfo(client)?|impact(client)?|jigsaw(client)?|bleachhack|aristois|rusherhack|future(client)?|inertia(client)?|wexside|huzuni|fdp(client)?|thunderhack)([^a-z0-9]|$)'
     $isFullClient = ($evidenceText -match $fullClientRegex)
     $singleLightModule = ($strongCount -eq 1 -and (($Terms -join ' ') -match '(?i)\b(Freecam|FreeCamera|FullBright|Fullbright)\b'))
 
@@ -687,6 +689,8 @@ if ($Path) {
 } else {
     $rootSpecs = @(
         ('12|' + (Join-Path $up 'Downloads')),
+        ('12|' + (Join-Path $env:APPDATA 'Microsoft\Windows\Recent')),
+        ('12|' + (Join-Path $env:SystemRoot 'Prefetch')),
         ('8|' + (Join-Path $env:LOCALAPPDATA 'Packages')),
         ('5|' + (Join-Path $env:LOCALAPPDATA 'Temp')),
         ('4|' + (Join-Path $env:APPDATA 'Badlion Client')),
@@ -722,8 +726,7 @@ $skipList = @(
     'nvidia corporation', 'adobe', 'steam', 'steamapps', 'epic games', 'tlauncher', '.tlauncher',
     'jetbrains', 'code', 'obs-studio', 'npm', 'python', 'dotnet', 'nuget'
 )
-# the libraries folder holds thousands of normal jars: only read it with -Deep / Full / -Path
-if (-not ($Deep -or $Mode -eq 'Full' -or $Path)) { $skipList += 'libraries' }
+# .minecraft\libraries is included in the index; only archive metadata/names are read by default, not .class bytecode.
 
 $maxBytes = [int64]$MaxSizeMB * 1MB
 
@@ -739,7 +742,7 @@ Write-Host ''
 $scanned = 0
 Show-Hud 'INDEX' 'listing files...'
 $indexLines = [SigCore]::Index([string[]]$rootSpecs, [string[]]$skipList,
-                               [string[]]@('.jar', '.zip', '.mrpack', '.rar', '.7z', '.litemod', '.exe', '.dll', '.bat', '.cmd', '.ps1', '.vbs', '.js', '.py', '.json', '.toml', '.cfg', '.conf', '.properties', '.txt'), $maxBytes, [int64]300MB)
+                               [string[]]@('.jar', '.zip', '.mrpack', '.rar', '.7z', '.litemod', '.exe', '.dll', '.bat', '.cmd', '.ps1', '.vbs', '.js', '.py', '.json', '.toml', '.cfg', '.conf', '.properties', '.txt', '.pf', '.lnk'), $maxBytes, [int64]300MB)
 
 $pathList = New-Object 'System.Collections.Generic.List[string]'
 $sizeOf = @{}
@@ -769,12 +772,15 @@ for ($i = 0; $i -lt $total; $i += $chunkSize) {
 
     # generic client names in file names (Vape V4.exe, Sigma Client.jar ...)
     foreach ($pth in $paths) {
-        $mm = $nameRegex.Match([IO.Path]::GetFileName($pth))
-        if ($mm.Success) {
-            $term = '{0} (file name)' -f $mm.Groups[2].Value
+        $baseName = [IO.Path]::GetFileName($pth)
+        $mm = $nameRegex.Match($baseName)
+        $knownClient = [regex]::Match($baseName, '(?i)(wurst|liquidbounce|meteor|doomsday|prestige|vape|raven|sigma|rise|novoline|tenacity|astolfo|impact|jigsaw|bleachhack|aristois|rusherhack|future|inertia|wexside|huzuni|fdp|thunderhack)')
+        if ($mm.Success -or $knownClient.Success) {
+            $matchedName = if ($mm.Success) { $mm.Groups[2].Value } else { $knownClient.Groups[1].Value }
+            $term = '{0} (file name)' -f $matchedName
             $db[$term] = 3
             if (-not $found.ContainsKey($pth)) { $found[$pth] = @{ Name = @(); Content = @() } }
-            # only when no distinctive name term matched already (avoid double counting)
+            # filename hits are useful even when the file has no readable strings
             if ($found[$pth].Name.Count -eq 0) { $found[$pth].Name += $term }
         }
     }
@@ -995,8 +1001,8 @@ if ($rows.Count -gt 0) {
 
 Write-Host ''
 Write-Host '    a match is a lead, not proof - check the path and date first.' -ForegroundColor DarkGray
-Write-Host '    Hidden files are included when accessible; Recycle Bin, Startup and Xray pack archives are checked.' -ForegroundColor DarkGray
-Write-Host '    Prefetch/Recent show traces, not proof of in-game use; unknown files are not automatically cheats.' -ForegroundColor DarkGray
+Write-Host '    Hidden files are included when accessible; .minecraft libraries, Downloads, Recent, Prefetch and Recycle Bin are checked.' -ForegroundColor DarkGray
+Write-Host '    Archive metadata/names are scanned by default; .class bytecode is only scanned with -Deep. Prefetch/Recent are traces, not proof.' -ForegroundColor DarkGray
 Write-Host "    MiniSS by $Author  |  $Invite" -ForegroundColor Magenta
 Write-Host ''
 
