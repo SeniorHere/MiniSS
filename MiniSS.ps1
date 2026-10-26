@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    MiniSS - Mini ScreenShare scanner (v3.6 - lightweight class-string analysis)
+    MiniSS - Mini ScreenShare scanner (v3.7 - targeted archive and string analysis)
     Author : Senior
     Discord: https://discord.gg/95MmttMD6
 
@@ -14,10 +14,10 @@
     A CSV + HTML report is saved on the Desktop.
 
 .PARAMETER Mode
-    Quick = Downloads, Desktop, Documents, .minecraft + launchers, Temp   [default, light and fast]
+    Quick = .minecraft, Downloads, Recent, Prefetch, Temp, Recycle Bin + launcher folders
     Full  = every fixed / removable drive (slower)
 .PARAMETER Deep
-    Expands class-string scanning to all JARs (slower). Quick mode already scans likely locations such as mods/Downloads/Temp.
+    Expands class-string scanning to all JARs, including vanilla libraries and versions (slower).
 .PARAMETER Path
     Scan only these folders (overrides Mode).
 .PARAMETER ShowWeak
@@ -113,7 +113,14 @@ Add-Terms 2 @(
 # Weak: common words that also appear in harmless files (never reported alone)
 Add-Terms 1 @(
     'Flight', 'Macro', 'Velocity', 'XRay', 'X-Ray', 'FastPlace', 'Hitbox', 'Bhop', 'WallHack', 'Injector',
-    'Criticals', 'Backtrack', 'AutoHotkey', 'Surround', 'AutoArmor', 'FreeCam', 'Fullbright', 'OreESP'
+    'Criticals', 'Backtrack', 'AutoHotkey', 'Surround', 'AutoArmor', 'FreeCam', 'Fullbright', 'OreESP',
+    # Java/Minecraft behavior indicators: weak individually; clusters can flag unknown mods for review.
+    'C02PacketUseEntity', 'CPacketUseEntity', 'C0BPacketEntityAction', 'CPacketPlayer',
+    'sendPacket', 'attackEntity', 'getMouseOver', 'reachDistance', 'timerSpeed',
+    'EntityPlayerSP', 'ClientPlayerEntity', 'PlayerEntity', 'MinecraftClient',
+    'org.spongepowered.asm.mixin', 'Mixin', 'EntityRenderer', 'WorldRenderer',
+    'KeyBinding', 'InputUtil', 'GLFW_KEY', 'isFlying', 'setVelocity', 'NoSlow',
+    'findTarget', 'targetEntity', 'rotationYaw', 'rotationPitch', 'rayTrace'
 )
 
 # Generic client names: matched in FILE NAMES only, and only together with a typical suffix
@@ -159,8 +166,8 @@ public static class SigCore
     static byte[] lower = MakeLower();
     static int longest = 1;
     const int Chunk = 512 * 1024;
-    const long JarBudget = 8L * 1024 * 1024;
-    const long ZipBudget = 2L * 1024 * 1024;
+    const long JarBudget = 6L * 1024 * 1024;
+    const long ZipBudget = 6L * 1024 * 1024;
     public static bool Deep = false;
 
     static byte[] MakeLower()
@@ -288,7 +295,12 @@ public static class SigCore
         long budget = isZip ? ZipBudget : JarBudget;
         bool deep = Deep;
         string lowerPath = path.ToLowerInvariant();
-        bool inspectClasses = !isZip && (deep || lowerPath.Contains("\\mods\\") || lowerPath.Contains("\\downloads\\") || lowerPath.Contains("\\temp\\"));
+        bool inMinecraft = lowerPath.Contains("\\.minecraft\\") || lowerPath.Contains("\\minecraft\\");
+        bool inTargetFolder = lowerPath.Contains("\\mods\\") || lowerPath.Contains("\\modpacks\\") || lowerPath.Contains("\\downloads\\") || lowerPath.Contains("\\temp\\");
+        // Class constant-pool strings are scanned in mod/download/temp archives and in
+        // Minecraft archives outside the huge vanilla libraries/versions trees.
+        bool inVanillaBulk = lowerPath.Contains("\\libraries\\") || lowerPath.Contains("\\versions\\");
+        bool inspectClasses = !isZip && (deep || inTargetFolder || (inMinecraft && !inVanillaBulk));
         using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
                                        FileShare.ReadWrite | FileShare.Delete, 4096))
         using (var zip = new ZipArchive(fs, ZipArchiveMode.Read))
@@ -307,6 +319,39 @@ public static class SigCore
                 if (budget <= 0) break;
                 if (e.Length == 0) continue;
                 string n = e.FullName.ToLowerInvariant();
+                // Some modpack/resource archives contain nested JARs. Inspect a bounded
+                // amount of their class constant-pool strings without extracting to disk.
+                if (isZip && n.EndsWith(".jar", StringComparison.Ordinal) && e.Length <= 20L * 1024 * 1024)
+                {
+                    try
+                    {
+                        using (Stream nestedStream = e.Open())
+                        using (var nestedMemory = new MemoryStream())
+                        {
+                            nestedStream.CopyTo(nestedMemory);
+                            nestedMemory.Position = 0;
+                            using (var nestedZip = new ZipArchive(nestedMemory, ZipArchiveMode.Read))
+                            {
+                                foreach (ZipArchiveEntry ce in nestedZip.Entries)
+                                {
+                                    if (budget <= 0) break;
+                                    string cn = ce.FullName.ToLowerInvariant();
+                                    if (!cn.EndsWith(".class", StringComparison.Ordinal) || ce.Length <= 0 || ce.Length > 512 * 1024) continue;
+                                    if (ce.Length > budget) continue;
+                                    budget -= ce.Length;
+                                    using (Stream cs = ce.Open())
+                                    using (var cm = new MemoryStream((int)ce.Length))
+                                    {
+                                        cs.CopyTo(cm);
+                                        Scan(cm.GetBuffer(), (int)cm.Length, hits);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception) { }
+                    continue;
+                }
                 bool meta = e.Length <= 262144 &&
                             (n.EndsWith("mod.json", StringComparison.Ordinal)
                              || n.EndsWith("mcmod.info", StringComparison.Ordinal)
@@ -317,11 +362,22 @@ public static class SigCore
                 // Scan class constant-pool strings by default in likely cheat locations.
                 // Strict per-entry and per-archive budgets keep CPU/RAM use bounded.
                 bool cls = inspectClasses && e.Length <= 1024 * 1024 && n.EndsWith(".class", StringComparison.Ordinal);
-                bool packMeta = isZip && e.Length <= 262144 &&
+                // Resource/shader packs often hide their useful content in GLSL source,
+                // properties, JSON and mcmeta files, not just pack.mcmeta.
+                bool packContent = isZip && e.Length <= 512 * 1024 &&
                             (n.EndsWith("pack.mcmeta", StringComparison.Ordinal) ||
                              n.EndsWith(".txt", StringComparison.Ordinal) ||
-                             n.EndsWith(".json", StringComparison.Ordinal));
-                if (isZip ? (!packMeta) : (!meta && !cls)) continue;
+                             n.EndsWith(".json", StringComparison.Ordinal) ||
+                             n.EndsWith(".mcmeta", StringComparison.Ordinal) ||
+                             n.EndsWith(".properties", StringComparison.Ordinal) ||
+                             n.EndsWith(".fsh", StringComparison.Ordinal) ||
+                             n.EndsWith(".vsh", StringComparison.Ordinal) ||
+                             n.EndsWith(".glsl", StringComparison.Ordinal) ||
+                             n.EndsWith(".frag", StringComparison.Ordinal) ||
+                             n.EndsWith(".vert", StringComparison.Ordinal) ||
+                             n.EndsWith(".toml", StringComparison.Ordinal) ||
+                             n.EndsWith(".class", StringComparison.Ordinal));
+                if (isZip ? (!packContent) : (!meta && !cls)) continue;
                 if (cls && budget <= 0) break;
 
                 budget -= e.Length;
@@ -527,7 +583,7 @@ function Show-Banner {
     $pw = 56
     $host1 = 'host {0}   |   {1}' -f $env:COMPUTERNAME, (Get-Date -Format 'yyyy-MM-dd HH:mm')
     $items = @(
-        @('MiniSS  //  Screenshare Scanner        v3.6', 'White'),
+        @('MiniSS  //  Screenshare Scanner        v3.7', 'White'),
         @('by Senior   |   Senior Academy', 'Magenta'),
         @($Invite, 'Cyan'),
         @('RED = suspicious    order: LOW > MEDIUM > HIGH', 'Gray'),
@@ -621,8 +677,10 @@ function Add-Row {
         else               { $hints += $t }
     }
 
-    # weak words alone never trigger a report (they appear in harmless files too)
-    if ($strongCount -eq 0 -and $medCount -eq 0 -and -not $ShowWeak) { return }
+    # Weak behavior/API strings are noisy alone. A cluster is a review lead, not proof.
+    $weakCount = @($Terms | Where-Object { $db[$_] -eq 1 } | Sort-Object -Unique).Count
+    $clusterLead = ($strongCount -eq 0 -and $medCount -eq 0 -and $weakCount -ge 4)
+    if ($strongCount -eq 0 -and $medCount -eq 0 -and -not $ShowWeak -and -not $clusterLead) { return }
     if ($hot.Count -eq 0) { $hot = $hints; $hints = @() }
 
     # Severity policy: complete client signatures are HIGH; a single limited
@@ -637,6 +695,7 @@ function Add-Row {
     elseif ($strongCount -ge 2 -or $score -ge 8) { $label = 'HIGH' }
     elseif ($singleLightModule)                 { $label = 'LOW' }
     elseif ($strongCount -eq 1 -or $medCount -ge 1) { $label = 'MEDIUM' }
+    elseif ($clusterLead)                       { $label = 'MEDIUM' }
     else                                        { $label = 'LOW' }
 
     # A lone string found inside a large binary is weaker than a filename/signature hit.
@@ -702,21 +761,17 @@ if ($Path) {
         ('12|' + (Join-Path $up 'Downloads')),
         ('12|' + (Join-Path $env:APPDATA 'Microsoft\Windows\Recent')),
         ('12|' + (Join-Path $env:SystemRoot 'Prefetch')),
-        ('8|' + (Join-Path $env:LOCALAPPDATA 'Packages')),
         ('5|' + (Join-Path $env:LOCALAPPDATA 'Temp')),
         ('4|' + (Join-Path $env:APPDATA 'Badlion Client')),
         ('4|' + (Join-Path $env:APPDATA 'LunarClient')),
-        ('4|' + (Join-Path $env:LOCALAPPDATA 'Programs')),
         ('5|' + (Join-Path $up 'Desktop')),
         ('4|' + (Join-Path $up 'Documents')),
-        ('3|' + (Join-Path $up 'OneDrive')),
         ('4|' + (Join-Path $up 'curseforge')),
         ('12|' + (Join-Path $env:APPDATA '.minecraft')),
         ('5|' + (Join-Path $env:APPDATA 'PrismLauncher')),
         ('5|' + (Join-Path $env:APPDATA 'MultiMC')),
         ('5|' + (Join-Path $env:APPDATA 'ModrinthApp')),
         ('5|' + (Join-Path $env:APPDATA 'com.modrinth.theseus')),
-        ('1|' + $env:APPDATA),
         ('12|' + $env:TEMP),
         ('8|' + (Join-Path $env:LOCALAPPDATA 'Temp')),
         ('4|' + (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup')),
@@ -731,13 +786,13 @@ if ($Path) {
 $skipList = @(
     'node_modules', '.git', '__pycache__', 'windows', 'winsxs', 'windowsapps',
     'system volume information', 'assets', 'runtime', 'logs', 'crash-reports', 'saves', 'natives',
-    'shaderpacks', 'screenshots', 'cache', 'code cache', 'gpucache', 'indexeddb',
+    'screenshots', 'cache', 'code cache', 'gpucache', 'indexeddb',
     'local storage', 'service worker', 'discord', 'whatsapp', 'telegram desktop', 'spotify', 'slack',
     'zoom', 'teams', 'microsoft', 'google', 'mozilla', 'opera software', 'brave-browser', 'nvidia',
     'nvidia corporation', 'adobe', 'steam', 'steamapps', 'epic games', 'tlauncher', '.tlauncher',
     'jetbrains', 'code', 'obs-studio', 'npm', 'python', 'dotnet', 'nuget'
 )
-# .minecraft\mods, Downloads and Temp JARs get bounded class-string scanning; other JARs get names/metadata only.
+# Targeted archives get bounded class-string scanning; vanilla libraries/versions avoid expensive class scans unless -Deep is supplied.
 
 $maxBytes = [int64]$MaxSizeMB * 1MB
 
@@ -753,7 +808,7 @@ Write-Host ''
 $scanned = 0
 Show-Hud 'INDEX' 'listing files...'
 $indexLines = [SigCore]::Index([string[]]$rootSpecs, [string[]]$skipList,
-                               [string[]]@('.jar', '.zip', '.mrpack', '.rar', '.7z', '.litemod', '.exe', '.dll', '.bat', '.cmd', '.ps1', '.vbs', '.js', '.py', '.json', '.toml', '.cfg', '.conf', '.properties', '.txt', '.pf', '.lnk'), $maxBytes, [int64]300MB)
+                               [string[]]@('.jar', '.zip', '.mrpack', '.rar', '.7z', '.litemod', '.exe', '.dll', '.bat', '.cmd', '.ps1', '.vbs', '.js', '.py', '.json', '.toml', '.cfg', '.conf', '.properties', '.txt', '.fsh', '.vsh', '.glsl', '.frag', '.vert', '.mcmeta'), $maxBytes, [int64]300MB)
 
 $pathList = New-Object 'System.Collections.Generic.List[string]'
 $sizeOf = @{}
