@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    MiniSS - Mini ScreenShare scanner (v3.2 - targeted evidence)
+    MiniSS - Mini ScreenShare scanner (v3.3 - targeted evidence)
     Author : Senior
     Discord: https://discord.gg/95MmttMD6
 
@@ -61,16 +61,22 @@ function Add-Terms {
 # Strong: cheat modules
 Add-Terms 3 @(
     'AutoTotem', 'InventoryTotem', 'InvTotem', 'AutoInventoryTotem', 'TotemHit',
+    'AutoTotemModule', 'TotemPopCounter', 'TotemSwap', 'AutoTotemSwap',
     'AutoCrystal', 'CrystalAura', 'OneHitCrystal', 'CrystalOptimizer', 'FastCrystal', 'AutoHitCrystal',
     'AnchorMacro', 'AnchorAura', 'AutoAnchor',
     'AutoStun', 'StunSlam', 'Stun-Slam', 'ShieldBreaker', 'AutoPot', 'AutoDoubleHand',
     'TriggerBot', 'KillAura', 'AimAssist', 'AimBot', 'AutoClicker',
+    'Freecam', 'FreeCamera', 'Baritone', 'Doomsday', 'AntiAim', 'NoRender', 'NoRotate',
+    'TimerHack', 'FastUse', 'FastEat', 'AutoFish', 'AutoMine', 'AutoTool', 'ChestStealer',
+    'AutoSteal', 'AutoGG', 'AutoRespawn', 'AutoQueue', 'AutoRequeue', 'Blink', 'Disabler',
     'InvMove', 'MaceDMG', 'MaceAura', 'AutoMace', 'NoFall', 'AutoWTap', 'ScaffoldWalk',
     'AutoCrit', 'PacketFly', 'AntiKnockback', 'NoKnockback'
 )
 # Strong: cheat clients (distinctive names)
 Add-Terms 3 @(
     'LiquidBounce', 'meteordevelopment', 'meteor-client', 'MeteorClient', 'Meteor Client',
+    'OringoClient', 'Oringo Client', 'Dortware', 'Dortware Client', 'Asteria Client', 'AsteriaClient',
+    'Haruka Client', 'HarukaClient', 'Augustus Client', 'AugustusClient', 'Vega Client', 'VegaClient',
     'wurstclient', 'wurst-client', 'Wurst Client', 'BleachHack', 'Aristois', 'RusherHack', 'ThunderHack',
     'FutureClient', 'Future Client', 'vape.gg', 'VapeV4', 'VapeV3', 'VapeLite', 'Vape Client',
     'Vape V4', 'Vape V3', 'Vape Lite', 'RavenB+', 'Raven B+', 'RavenBPlus',
@@ -96,12 +102,15 @@ Add-Terms 3 @(
 # Medium
 Add-Terms 2 @(
     'ClickGUI', 'ReachHack', 'TinyTask', 'HitSelect', 'DoubleHand', 'NoSlowdown', 'ElytraFly',
-    'GSAutoClicker', 'OPAutoClicker', 'SpeedAutoClicker', 'AutoTrap', 'HoleFiller', 'SelfFill', 'FastBreak'
+    'GSAutoClicker', 'OPAutoClicker', 'SpeedAutoClicker', 'AutoTrap', 'HoleFiller', 'SelfFill', 'FastBreak',
+    'Xray Ultimate', 'X-Ray Ultimate', 'Xray Texture Pack', 'X-Ray Texture Pack', 'Ores Only',
+    'CaveFinder', 'Cave Finder', 'FullBright', 'Full Bright', 'OreESP', 'Ore ESP', 'ESP Module',
+    'Freecam Mod', 'Free Camera Mod', 'AutoTotem Mod', 'Totem Swap Mod', 'Baritone Mod'
 )
 # Weak: common words that also appear in harmless files (never reported alone)
 Add-Terms 1 @(
-    'Flight', 'Macro', 'Velocity', 'XRay', 'FastPlace', 'Hitbox', 'Bhop', 'WallHack', 'Injector',
-    'Criticals', 'Backtrack', 'AutoHotkey', 'Surround', 'AutoArmor', 'FreeCam'
+    'Flight', 'Macro', 'Velocity', 'XRay', 'X-Ray', 'FastPlace', 'Hitbox', 'Bhop', 'WallHack', 'Injector',
+    'Criticals', 'Backtrack', 'AutoHotkey', 'Surround', 'AutoArmor', 'FreeCam', 'Fullbright', 'OreESP'
 )
 
 # Generic client names: matched in FILE NAMES only, and only together with a typical suffix
@@ -148,6 +157,7 @@ public static class SigCore
     static int longest = 1;
     const int Chunk = 2 * 1024 * 1024;
     const long JarBudget = 32L * 1024 * 1024;
+    const long ZipBudget = 8L * 1024 * 1024;
     public static bool Deep = false;
 
     static byte[] MakeLower()
@@ -270,7 +280,8 @@ public static class SigCore
     // Jar/zip: entry names + small metadata files; .class contents only with -Deep
     static void ScanJarInto(string path, List<string> hits)
     {
-        long budget = JarBudget;
+        bool isZip = Path.GetExtension(path).Equals(".zip", StringComparison.OrdinalIgnoreCase);
+        long budget = isZip ? ZipBudget : JarBudget;
         bool deep = Deep;
         using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
                                        FileShare.ReadWrite | FileShare.Delete, 4096))
@@ -297,8 +308,12 @@ public static class SigCore
                              || n.EndsWith("mods.toml", StringComparison.Ordinal)
                              || n.EndsWith("manifest.mf", StringComparison.Ordinal)
                              || n.EndsWith(".mixins.json", StringComparison.Ordinal));
-                bool cls = deep && e.Length <= 2 * 1024 * 1024 && n.EndsWith(".class", StringComparison.Ordinal);
-                if (!meta && !cls) continue;
+                bool cls = !isZip && deep && e.Length <= 2 * 1024 * 1024 && n.EndsWith(".class", StringComparison.Ordinal);
+                bool packMeta = isZip && e.Length <= 262144 &&
+                            (n.EndsWith("pack.mcmeta", StringComparison.Ordinal) ||
+                             n.EndsWith(".txt", StringComparison.Ordinal) ||
+                             n.EndsWith(".json", StringComparison.Ordinal));
+                if (isZip ? (!packMeta) : (!meta && !cls)) continue;
 
                 budget -= e.Length;
                 using (Stream s = e.Open())
@@ -385,7 +400,7 @@ public static class SigCore
                     if (fe.Length == 0 || !ext.ContainsKey(fe)) continue;
                     var fi = new FileInfo(f);
                     long len = fi.Length;
-                    bool archive = fe.Equals(".jar", StringComparison.OrdinalIgnoreCase);
+                    bool archive = fe.Equals(".jar", StringComparison.OrdinalIgnoreCase) || fe.Equals(".zip", StringComparison.OrdinalIgnoreCase);
                     long limit = archive ? maxArchiveBytes : maxBytes;
                     if (len <= 0 || len > limit) continue;
                     results.Add(f + "\t" + len.ToString() + "\t" + fi.LastWriteTime.Ticks.ToString());
@@ -413,7 +428,7 @@ public static class SigCore
                 string ext = Path.GetExtension(path).ToLowerInvariant();
                 try
                 {
-                    if (ext == ".jar") ScanJarInto(path, contentHits);
+                    if (ext == ".jar" || ext == ".zip") ScanJarInto(path, contentHits);
                     else ScanFileInto(path, contentHits);
                 }
                 catch (Exception) { }
@@ -495,7 +510,7 @@ function Show-Banner {
     $pw = 56
     $host1 = 'host {0}   |   {1}' -f $env:COMPUTERNAME, (Get-Date -Format 'yyyy-MM-dd HH:mm')
     $items = @(
-        @('MiniSS  //  Screenshare Scanner        v3.2', 'White'),
+        @('MiniSS  //  Screenshare Scanner        v3.3', 'White'),
         @('by Senior   |   Senior Academy', 'Magenta'),
         @($Invite, 'Cyan'),
         @('RED = suspicious    order: LOW > MEDIUM > HIGH', 'Gray'),
@@ -669,16 +684,20 @@ if ($Path) {
         ('5|' + (Join-Path $env:APPDATA 'com.modrinth.theseus')),
         ('1|' + $env:APPDATA),
         ('12|' + $env:TEMP),
-        ('3|' + (Join-Path $env:PUBLIC 'Downloads'))
+        ('8|' + (Join-Path $env:LOCALAPPDATA 'Temp')),
+        ('4|' + (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup')),
+        ('4|' + (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Startup')),
+        ('3|' + (Join-Path $env:PUBLIC 'Downloads')),
+        ('3|' + (Join-Path $env:SystemDrive '$Recycle.Bin'))
     )
     $modeName = 'Quick'
 }
 
 # folders that never contain what we are looking for (matched by folder name)
 $skipList = @(
-    'node_modules', '.git', '__pycache__', 'windows', 'winsxs', 'windowsapps', '$recycle.bin',
+    'node_modules', '.git', '__pycache__', 'windows', 'winsxs', 'windowsapps',
     'system volume information', 'assets', 'runtime', 'logs', 'crash-reports', 'saves', 'natives',
-    'resourcepacks', 'shaderpacks', 'screenshots', 'cache', 'code cache', 'gpucache', 'indexeddb',
+    'shaderpacks', 'screenshots', 'cache', 'code cache', 'gpucache', 'indexeddb',
     'local storage', 'service worker', 'discord', 'whatsapp', 'telegram desktop', 'spotify', 'slack',
     'zoom', 'teams', 'microsoft', 'google', 'mozilla', 'opera software', 'brave-browser', 'nvidia',
     'nvidia corporation', 'adobe', 'steam', 'steamapps', 'epic games', 'tlauncher', '.tlauncher',
@@ -701,7 +720,7 @@ Write-Host ''
 $scanned = 0
 Show-Hud 'INDEX' 'listing files...'
 $indexLines = [SigCore]::Index([string[]]$rootSpecs, [string[]]$skipList,
-                               [string[]]@('.jar', '.exe', '.dll', '.bat', '.cmd'), $maxBytes, [int64]300MB)
+                               [string[]]@('.jar', '.zip', '.exe', '.dll', '.bat', '.cmd'), $maxBytes, [int64]300MB)
 
 $pathList = New-Object 'System.Collections.Generic.List[string]'
 $sizeOf = @{}
@@ -957,6 +976,7 @@ if ($rows.Count -gt 0) {
 
 Write-Host ''
 Write-Host '    a match is a lead, not proof - check the path and date first.' -ForegroundColor DarkGray
+Write-Host '    Hidden files are included when accessible; Recycle Bin, Startup and Xray pack archives are checked.' -ForegroundColor DarkGray
 Write-Host '    Prefetch/Recent show traces, not proof of in-game use; unknown files are not automatically cheats.' -ForegroundColor DarkGray
 Write-Host "    MiniSS by $Author  |  $Invite" -ForegroundColor Magenta
 Write-Host ''
