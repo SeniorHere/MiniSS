@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    MiniSS - Mini ScreenShare scanner (v3.5 - coverage and name matching fix)
+    MiniSS - Mini ScreenShare scanner (v3.6 - lightweight class-string analysis)
     Author : Senior
     Discord: https://discord.gg/95MmttMD6
 
@@ -17,7 +17,7 @@
     Quick = Downloads, Desktop, Documents, .minecraft + launchers, Temp   [default, light and fast]
     Full  = every fixed / removable drive (slower)
 .PARAMETER Deep
-    Also reads inside the .class files of jars and scans .minecraft\libraries (slower, heavier).
+    Expands class-string scanning to all JARs (slower). Quick mode already scans likely locations such as mods/Downloads/Temp.
 .PARAMETER Path
     Scan only these folders (overrides Mode).
 .PARAMETER ShowWeak
@@ -158,9 +158,9 @@ public static class SigCore
     static bool[] pairOk = new bool[65536];
     static byte[] lower = MakeLower();
     static int longest = 1;
-    const int Chunk = 2 * 1024 * 1024;
-    const long JarBudget = 32L * 1024 * 1024;
-    const long ZipBudget = 8L * 1024 * 1024;
+    const int Chunk = 512 * 1024;
+    const long JarBudget = 8L * 1024 * 1024;
+    const long ZipBudget = 2L * 1024 * 1024;
     public static bool Deep = false;
 
     static byte[] MakeLower()
@@ -287,6 +287,8 @@ public static class SigCore
         bool isZip = archiveExt.Equals(".zip", StringComparison.OrdinalIgnoreCase) || archiveExt.Equals(".mrpack", StringComparison.OrdinalIgnoreCase);
         long budget = isZip ? ZipBudget : JarBudget;
         bool deep = Deep;
+        string lowerPath = path.ToLowerInvariant();
+        bool inspectClasses = !isZip && (deep || lowerPath.Contains("\\mods\\") || lowerPath.Contains("\\downloads\\") || lowerPath.Contains("\\temp\\"));
         using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
                                        FileShare.ReadWrite | FileShare.Delete, 4096))
         using (var zip = new ZipArchive(fs, ZipArchiveMode.Read))
@@ -312,12 +314,15 @@ public static class SigCore
                              || n.EndsWith("mods.toml", StringComparison.Ordinal)
                              || n.EndsWith("manifest.mf", StringComparison.Ordinal)
                              || n.EndsWith(".mixins.json", StringComparison.Ordinal));
-                bool cls = !isZip && deep && e.Length <= 2 * 1024 * 1024 && n.EndsWith(".class", StringComparison.Ordinal);
+                // Scan class constant-pool strings by default in likely cheat locations.
+                // Strict per-entry and per-archive budgets keep CPU/RAM use bounded.
+                bool cls = inspectClasses && e.Length <= 1024 * 1024 && n.EndsWith(".class", StringComparison.Ordinal);
                 bool packMeta = isZip && e.Length <= 262144 &&
                             (n.EndsWith("pack.mcmeta", StringComparison.Ordinal) ||
                              n.EndsWith(".txt", StringComparison.Ordinal) ||
                              n.EndsWith(".json", StringComparison.Ordinal));
                 if (isZip ? (!packMeta) : (!meta && !cls)) continue;
+                if (cls && budget <= 0) break;
 
                 budget -= e.Length;
                 using (Stream s = e.Open())
@@ -422,7 +427,7 @@ public static class SigCore
     {
         var results = new List<string>();
         var opts = new ParallelOptions();
-        opts.MaxDegreeOfParallelism = Math.Max(1, Math.Min(3, Environment.ProcessorCount - 1));
+        opts.MaxDegreeOfParallelism = 1;
         Parallel.ForEach(paths, opts, path =>
         {
             try
@@ -434,7 +439,13 @@ public static class SigCore
                 string ext = Path.GetExtension(path).ToLowerInvariant();
                 try
                 {
-                    if (ext == ".jar" || ext == ".zip" || ext == ".mrpack") ScanJarInto(path, contentHits);
+                    if (ext == ".jar" || ext == ".zip" || ext == ".mrpack")
+                    {
+                        string lp = path.ToLowerInvariant();
+                        bool likely = lp.Contains("\\mods\\") || lp.Contains("\\downloads\\") || lp.Contains("\\temp\\") || lp.Contains("\\$recycle.bin\\");
+                        // Avoid decompressing hundreds of ordinary game libraries in Quick mode.
+                        if (likely || Deep || ext == ".mrpack") ScanJarInto(path, contentHits);
+                    }
                     else ScanFileInto(path, contentHits);
                 }
                 catch (Exception) { }
@@ -516,7 +527,7 @@ function Show-Banner {
     $pw = 56
     $host1 = 'host {0}   |   {1}' -f $env:COMPUTERNAME, (Get-Date -Format 'yyyy-MM-dd HH:mm')
     $items = @(
-        @('MiniSS  //  Screenshare Scanner        v3.3', 'White'),
+        @('MiniSS  //  Screenshare Scanner        v3.6', 'White'),
         @('by Senior   |   Senior Academy', 'Magenta'),
         @($Invite, 'Cyan'),
         @('RED = suspicious    order: LOW > MEDIUM > HIGH', 'Gray'),
@@ -726,7 +737,7 @@ $skipList = @(
     'nvidia corporation', 'adobe', 'steam', 'steamapps', 'epic games', 'tlauncher', '.tlauncher',
     'jetbrains', 'code', 'obs-studio', 'npm', 'python', 'dotnet', 'nuget'
 )
-# .minecraft\libraries is included in the index; only archive metadata/names are read by default, not .class bytecode.
+# .minecraft\mods, Downloads and Temp JARs get bounded class-string scanning; other JARs get names/metadata only.
 
 $maxBytes = [int64]$MaxSizeMB * 1MB
 
@@ -1002,7 +1013,7 @@ if ($rows.Count -gt 0) {
 Write-Host ''
 Write-Host '    a match is a lead, not proof - check the path and date first.' -ForegroundColor DarkGray
 Write-Host '    Hidden files are included when accessible; .minecraft libraries, Downloads, Recent, Prefetch and Recycle Bin are checked.' -ForegroundColor DarkGray
-Write-Host '    Archive metadata/names are scanned by default; .class bytecode is only scanned with -Deep. Prefetch/Recent are traces, not proof.' -ForegroundColor DarkGray
+Write-Host '    Bounded class-string scan: JARs in mods/Downloads/Temp; other JARs use names/metadata. Prefetch/Recent are traces, not proof.' -ForegroundColor DarkGray
 Write-Host "    MiniSS by $Author  |  $Invite" -ForegroundColor Magenta
 Write-Host ''
 
