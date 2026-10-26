@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    MiniSS - Mini ScreenShare scanner (v3.0)
+    MiniSS - Mini ScreenShare scanner (v3.1 - lightweight)
     Author : Senior
     Discord: https://discord.gg/95MmttMD6
 
@@ -14,8 +14,10 @@
     A CSV + HTML report is saved on the Desktop.
 
 .PARAMETER Mode
-    Quick = Downloads, Desktop, Documents, AppData (.minecraft, launchers), Temp   [default, ~1-2 min]
+    Quick = Downloads, Desktop, Documents, .minecraft + launchers, Temp   [default, light and fast]
     Full  = every fixed / removable drive (slower)
+.PARAMETER Deep
+    Also reads inside the .class files of jars and scans .minecraft\libraries (slower, heavier).
 .PARAMETER Path
     Scan only these folders (overrides Mode).
 .PARAMETER ShowWeak
@@ -34,7 +36,8 @@ param(
     [string[]]$Path,
     [switch]$ShowWeak,
     [switch]$NoPause,
-    [int]$MaxSizeMB = 60,
+    [switch]$Deep,
+    [int]$MaxSizeMB = 25,
     [string]$OutDir = [Environment]::GetFolderPath('Desktop')
 )
 
@@ -144,7 +147,8 @@ public static class SigCore
     static byte[] lower = MakeLower();
     static int longest = 1;
     const int Chunk = 2 * 1024 * 1024;
-    const long JarBudget = 48L * 1024 * 1024;
+    const long JarBudget = 32L * 1024 * 1024;
+    public static bool Deep = false;
 
     static byte[] MakeLower()
     {
@@ -246,11 +250,14 @@ public static class SigCore
     static void ScanFileInto(string path, List<string> hits)
     {
         using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
-                                       FileShare.ReadWrite | FileShare.Delete, 1 << 16))
+                                       FileShare.ReadWrite | FileShare.Delete, 4096))
         {
-            byte[] buf = new byte[Chunk + longest];
+            long flen = fs.Length;
+            if (flen <= 0) return;
+            int chunk = (int)Math.Min((long)Chunk, flen);
+            byte[] buf = new byte[chunk + longest];
             int carry = 0, n;
-            while ((n = fs.Read(buf, carry, Chunk)) > 0)
+            while ((n = fs.Read(buf, carry, chunk)) > 0)
             {
                 int total = carry + n;
                 Scan(buf, total, hits);
@@ -260,24 +267,38 @@ public static class SigCore
         }
     }
 
+    // Jar/zip: entry names + small metadata files; .class contents only with -Deep
     static void ScanJarInto(string path, List<string> hits)
     {
         long budget = JarBudget;
+        bool deep = Deep;
         using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
-                                       FileShare.ReadWrite | FileShare.Delete))
+                                       FileShare.ReadWrite | FileShare.Delete, 4096))
         using (var zip = new ZipArchive(fs, ZipArchiveMode.Read))
         {
+            var sb = new StringBuilder();
             foreach (ZipArchiveEntry e in zip.Entries)
             {
-                byte[] nb = Encoding.UTF8.GetBytes(e.FullName);
-                Scan(nb, nb.Length, hits);
-                if (budget <= 0) continue;
+                sb.Append(e.FullName);
+                sb.Append('\n');
+            }
+            byte[] nb = Encoding.UTF8.GetBytes(sb.ToString());
+            Scan(nb, nb.Length, hits);
 
+            foreach (ZipArchiveEntry e in zip.Entries)
+            {
+                if (budget <= 0) break;
+                if (e.Length == 0) continue;
                 string n = e.FullName.ToLowerInvariant();
-                bool readable = n.EndsWith(".class") || n.EndsWith(".json") || n.EndsWith(".txt")
-                             || n.EndsWith(".properties") || n.EndsWith(".toml") || n.EndsWith(".mf")
-                             || n.EndsWith(".yml");
-                if (!readable || e.Length == 0 || e.Length > 2 * 1024 * 1024) continue;
+                bool meta = e.Length <= 262144 &&
+                            (n.EndsWith("mod.json", StringComparison.Ordinal)
+                             || n.EndsWith("mcmod.info", StringComparison.Ordinal)
+                             || n.EndsWith("plugin.yml", StringComparison.Ordinal)
+                             || n.EndsWith("mods.toml", StringComparison.Ordinal)
+                             || n.EndsWith("manifest.mf", StringComparison.Ordinal)
+                             || n.EndsWith(".mixins.json", StringComparison.Ordinal));
+                bool cls = deep && e.Length <= 2 * 1024 * 1024 && n.EndsWith(".class", StringComparison.Ordinal);
+                if (!meta && !cls) continue;
 
                 budget -= e.Length;
                 using (Stream s = e.Open())
@@ -290,12 +311,97 @@ public static class SigCore
         }
     }
 
+    // Fast file index. roots look like "depth|path". Returns lines: path <TAB> size <TAB> lastWriteTicks
+    public static string[] Index(string[] roots, string[] skipNames, string[] exts, long maxBytes, long maxArchiveBytes)
+    {
+        var skip = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        foreach (string s in skipNames) skip[s] = true;
+        var ext = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        foreach (string x in exts) ext[x] = true;
+        var visited = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        var results = new List<string>();
+        var rootList = new List<KeyValuePair<int, string>>();
+        foreach (string r in roots)
+        {
+            if (string.IsNullOrEmpty(r)) continue;
+            int bar = r.IndexOf('|');
+            int d = 4;
+            string p = r;
+            if (bar > 0)
+            {
+                int.TryParse(r.Substring(0, bar), out d);
+                p = r.Substring(bar + 1);
+            }
+            if (Directory.Exists(p)) rootList.Add(new KeyValuePair<int, string>(d, p));
+        }
+        // deeper roots first, so a shallow parent root (AppData) never limits a deeper child root (.minecraft)
+        rootList.Sort((k1, k2) => k2.Key.CompareTo(k1.Key));
+
+        var dirs = new List<string>();
+        var depths = new List<int>();
+        foreach (KeyValuePair<int, string> kv in rootList)
+        {
+            dirs.Add(kv.Value);
+            depths.Add(kv.Key);
+        }
+
+        int head = 0;
+        while (head < dirs.Count)
+        {
+            string dir = dirs[head];
+            int left = depths[head];
+            head++;
+
+            string key = dir.TrimEnd('\\');
+            if (visited.ContainsKey(key)) continue;
+            visited[key] = true;
+
+            if (left > 0)
+            {
+                try
+                {
+                    foreach (string sub in Directory.EnumerateDirectories(dir))
+                    {
+                        string leaf = Path.GetFileName(sub);
+                        if (skip.ContainsKey(leaf)) continue;
+                        try
+                        {
+                            FileAttributes attr = File.GetAttributes(sub);
+                            if ((attr & FileAttributes.ReparsePoint) != 0) continue;
+                        }
+                        catch (Exception) { continue; }
+                        dirs.Add(sub);
+                        depths.Add(left - 1);
+                    }
+                }
+                catch (Exception) { }
+            }
+
+            try
+            {
+                foreach (string f in Directory.EnumerateFiles(dir))
+                {
+                    string fe = Path.GetExtension(f);
+                    if (fe.Length == 0 || !ext.ContainsKey(fe)) continue;
+                    var fi = new FileInfo(f);
+                    long len = fi.Length;
+                    bool archive = fe.Equals(".jar", StringComparison.OrdinalIgnoreCase);
+                    long limit = archive ? maxArchiveBytes : maxBytes;
+                    if (len <= 0 || len > limit) continue;
+                    results.Add(f + "\t" + len.ToString() + "\t" + fi.LastWriteTime.Ticks.ToString());
+                }
+            }
+            catch (Exception) { }
+        }
+        return results.ToArray();
+    }
+
     // Scans many files in parallel. Returns lines:  path <TAB> nameHits <TAB> contentHits
     public static string[] ScanMany(string[] paths)
     {
         var results = new List<string>();
         var opts = new ParallelOptions();
-        opts.MaxDegreeOfParallelism = Math.Max(1, Math.Min(8, Environment.ProcessorCount));
+        opts.MaxDegreeOfParallelism = Math.Max(1, Math.Min(6, Environment.ProcessorCount - 1));
         Parallel.ForEach(paths, opts, path =>
         {
             try
@@ -326,6 +432,7 @@ public static class SigCore
     Add-Type -TypeDefinition $csharp -ReferencedAssemblies 'System.IO.Compression'
 }
 [SigCore]::Load($allTerms)
+[SigCore]::Deep = [bool]$Deep
 
 # ---------------------------------------------------------------------------
 # 3) Look & feel
@@ -356,16 +463,24 @@ function Show-Banner {
 
     Write-Host ''
     foreach ($line in $lines) {
-        Write-Host '      ' -NoNewline
+        $runText = '      '
+        $runCol  = 'Gray'
         for ($c = 0; $c -lt $line.Length; $c++) {
             if ($line[$c] -eq '#') {
-                $col = $grad[[math]::Floor($c * $grad.Count / $width)]
-                Write-Host ($dot + ' ') -NoNewline -ForegroundColor $col
+                $col  = $grad[[math]::Floor($c * $grad.Count / $width)]
+                $cell = $dot + ' '
             } else {
-                Write-Host '  ' -NoNewline
+                $col  = $runCol
+                $cell = '  '
+            }
+            if ($col -eq $runCol) { $runText += $cell }
+            else {
+                Write-Host $runText -NoNewline -ForegroundColor $runCol
+                $runText = $cell
+                $runCol  = $col
             }
         }
-        Write-Host ''
+        Write-Host $runText -ForegroundColor $runCol
     }
     Write-Host ('      ' + (($dim + ' ') * $width)) -ForegroundColor DarkGray
     Write-Host ''
@@ -380,7 +495,7 @@ function Show-Banner {
     $pw = 56
     $host1 = 'host {0}   |   {1}' -f $env:COMPUTERNAME, (Get-Date -Format 'yyyy-MM-dd HH:mm')
     $items = @(
-        @('MiniSS  //  Screenshare Scanner        v2.0', 'White'),
+        @('MiniSS  //  Screenshare Scanner        v3.1', 'White'),
         @('by Senior   |   Senior Academy', 'Magenta'),
         @($Invite, 'Cyan'),
         @('RED = suspicious    order: LOW > MEDIUM > HIGH', 'Gray'),
@@ -498,13 +613,13 @@ function Add-Row {
     })
 }
 
-# true when the file carries a valid signature from a well-known publisher
+# Fast check: does the file carry an embedded signer certificate of a well-known publisher?
+# (reads the certificate only - no slow online validation)
 function Test-Trusted {
     param([string]$FilePath)
     try {
-        $sig = Get-AuthenticodeSignature -LiteralPath $FilePath -ErrorAction Stop
-        if ($sig.Status -ne 'Valid') { return $false }
-        $subject = [string]$sig.SignerCertificate.Subject
+        $cert = [System.Security.Cryptography.X509Certificates.X509Certificate]::CreateFromSignedFile($FilePath)
+        $subject = [string]$cert.Subject
         foreach ($p in $trustedPublishers) { if ($subject -like "*$p*") { return $true } }
     } catch { }
     return $false
@@ -515,36 +630,6 @@ function ConvertTo-HtmlText {
     [System.Net.WebUtility]::HtmlEncode([string]$Text)
 }
 
-# Builds the list of candidate files (fast; no file contents are read here)
-function Find-Files {
-    param([string[]]$Roots, [hashtable]$SkipNames, [hashtable]$Exts, [int64]$MaxBytes)
-    $stack   = New-Object 'System.Collections.Generic.Stack[string]'
-    $visited = @{}
-    foreach ($r in $Roots) { if ($r -and (Test-Path -LiteralPath $r)) { $stack.Push($r) } }
-    $dirCount = 0
-    while ($stack.Count -gt 0) {
-        $dir = $stack.Pop()
-        if ($visited.ContainsKey($dir)) { continue }
-        $visited[$dir] = 1
-        $dirCount++
-        if ($dirCount % 150 -eq 0) { Show-Hud 'INDEX' ("{0} folders, {1} files  {2}" -f $dirCount, $files.Count, $dir) }
-        $di = $null
-        try { $di = New-Object System.IO.DirectoryInfo $dir } catch { continue }
-        try {
-            foreach ($sub in $di.EnumerateDirectories()) {
-                if ($sub.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
-                if ($SkipNames.ContainsKey($sub.Name)) { continue }
-                $stack.Push($sub.FullName)
-            }
-        } catch { }
-        try {
-            foreach ($f in $di.EnumerateFiles()) {
-                if ($f.Length -gt 0 -and $f.Length -le $MaxBytes -and $Exts.ContainsKey($f.Extension.ToLowerInvariant())) { $f }
-            }
-        } catch { }
-    }
-}
-
 # ---------------------------------------------------------------------------
 # 5) Start
 # ---------------------------------------------------------------------------
@@ -552,65 +637,87 @@ Clear-Host
 Show-Banner
 $started = Get-Date
 
+# stay polite: run below normal priority so the PC does not lag while scanning
+try { [System.Diagnostics.Process]::GetCurrentProcess().PriorityClass = 'BelowNormal' } catch { }
+
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
            ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 $up = $env:USERPROFILE
+# every root is "depth|folder"  (depth = how many folder levels to go down)
 if ($Path) {
-    $roots = $Path
+    $rootSpecs = @($Path | ForEach-Object { '12|' + $_ })
     $modeName = 'Custom'
 } elseif ($Mode -eq 'Full') {
-    $roots = [IO.DriveInfo]::GetDrives() |
-             Where-Object { $_.IsReady -and ($_.DriveType -eq 'Fixed' -or $_.DriveType -eq 'Removable') } |
-             ForEach-Object { $_.RootDirectory.FullName }
+    $rootSpecs = @([IO.DriveInfo]::GetDrives() |
+                   Where-Object { $_.IsReady -and ($_.DriveType -eq 'Fixed' -or $_.DriveType -eq 'Removable') } |
+                   ForEach-Object { '12|' + $_.RootDirectory.FullName })
     $modeName = 'Full'
 } else {
-    $roots = @(
-        (Join-Path $up 'Downloads'), (Join-Path $up 'Desktop'), (Join-Path $up 'Documents'),
-        (Join-Path $up 'OneDrive'), (Join-Path $up 'curseforge'),
-        $env:APPDATA, $env:TEMP, (Join-Path $env:PUBLIC 'Downloads')
+    $rootSpecs = @(
+        ('5|' + (Join-Path $up 'Downloads')),
+        ('5|' + (Join-Path $up 'Desktop')),
+        ('4|' + (Join-Path $up 'Documents')),
+        ('3|' + (Join-Path $up 'OneDrive')),
+        ('4|' + (Join-Path $up 'curseforge')),
+        ('6|' + (Join-Path $env:APPDATA '.minecraft')),
+        ('5|' + (Join-Path $env:APPDATA 'PrismLauncher')),
+        ('5|' + (Join-Path $env:APPDATA 'MultiMC')),
+        ('5|' + (Join-Path $env:APPDATA 'ModrinthApp')),
+        ('5|' + (Join-Path $env:APPDATA 'com.modrinth.theseus')),
+        ('1|' + $env:APPDATA),
+        ('3|' + $env:TEMP),
+        ('3|' + (Join-Path $env:PUBLIC 'Downloads'))
     )
     $modeName = 'Quick'
 }
 
 # folders that never contain what we are looking for (matched by folder name)
-$skipNames = @{}
-foreach ($n in @(
+$skipList = @(
     'node_modules', '.git', '__pycache__', 'windows', 'winsxs', 'windowsapps', '$recycle.bin',
-    'system volume information', 'assets', 'runtime', 'logs', 'crash-reports', 'saves',
+    'system volume information', 'assets', 'runtime', 'logs', 'crash-reports', 'saves', 'natives',
     'resourcepacks', 'shaderpacks', 'screenshots', 'cache', 'code cache', 'gpucache', 'indexeddb',
     'local storage', 'service worker', 'discord', 'whatsapp', 'telegram desktop', 'spotify', 'slack',
     'zoom', 'teams', 'microsoft', 'google', 'mozilla', 'opera software', 'brave-browser', 'nvidia',
     'nvidia corporation', 'adobe', 'steam', 'steamapps', 'epic games', 'tlauncher', '.tlauncher',
     'jetbrains', 'code', 'obs-studio', 'npm', 'python', 'dotnet', 'nuget'
-)) { $skipNames[$n] = 1 }
+)
+# the libraries folder holds thousands of normal jars: only read it with -Deep / Full / -Path
+if (-not ($Deep -or $Mode -eq 'Full' -or $Path)) { $skipList += 'libraries' }
 
-$exts = @{ '.jar' = 1; '.exe' = 1; '.dll' = 1; '.bat' = 1; '.cmd' = 1 }
 $maxBytes = [int64]$MaxSizeMB * 1MB
 
-Write-Host "    mode: $modeName   admin: $isAdmin   signatures: $($allTerms.Count)" -ForegroundColor DarkGray
+Write-Host "    mode: $modeName   admin: $isAdmin   signatures: $($allTerms.Count)   deep: $([bool]$Deep)" -ForegroundColor DarkGray
 if (-not $isAdmin) {
     Write-Host '    tip: run as Administrator to also read Prefetch (past program runs).' -ForegroundColor Yellow
 }
 Write-Host ''
 
 # ---------------------------------------------------------------------------
-# 6) Files: index first, then scan in parallel
+# 6) Files: fast index (compiled code), then parallel scan
 # ---------------------------------------------------------------------------
 $scanned = 0
-$files = New-Object System.Collections.Generic.List[object]
-Find-Files -Roots $roots -SkipNames $skipNames -Exts $exts -MaxBytes $maxBytes | ForEach-Object { $files.Add($_) }
+Show-Hud 'INDEX' 'listing files...'
+$indexLines = [SigCore]::Index([string[]]$rootSpecs, [string[]]$skipList,
+                               [string[]]@('.jar', '.exe', '.dll', '.bat', '.cmd'), $maxBytes, [int64]300MB)
 
-$total = $files.Count
+$pathList = New-Object 'System.Collections.Generic.List[string]'
+$sizeOf = @{}
+$tickOf = @{}
+foreach ($ln in $indexLines) {
+    $c = $ln.Split("`t")
+    $pathList.Add($c[0])
+    $sizeOf[$c[0]] = [int64]$c[1]
+    $tickOf[$c[0]] = [int64]$c[2]
+}
+
+$total = $pathList.Count
 $scanStart = Get-Date
-$chunkSize = 48
+$chunkSize = 64
 
 for ($i = 0; $i -lt $total; $i += $chunkSize) {
-    $n    = [math]::Min($chunkSize, $total - $i)
-    $part = $files.GetRange($i, $n)
-    $map  = @{}
-    foreach ($f in $part) { $map[$f.FullName] = $f }
-    $paths = [string[]]@($part | ForEach-Object { $_.FullName })
+    $n     = [math]::Min($chunkSize, $total - $i)
+    $paths = $pathList.GetRange($i, $n).ToArray()
 
     $found = @{}
     foreach ($line in [SigCore]::ScanMany($paths)) {
@@ -621,31 +728,32 @@ for ($i = 0; $i -lt $total; $i += $chunkSize) {
     }
 
     # generic client names in file names (Vape V4.exe, Sigma Client.jar ...)
-    foreach ($f in $part) {
-        $mm = $nameRegex.Match($f.Name)
+    foreach ($pth in $paths) {
+        $mm = $nameRegex.Match([IO.Path]::GetFileName($pth))
         if ($mm.Success) {
             $term = '{0} (file name)' -f $mm.Groups[2].Value
             $db[$term] = 3
-            if (-not $found.ContainsKey($f.FullName)) { $found[$f.FullName] = @{ Name = @(); Content = @() } }
-            $found[$f.FullName].Name += $term
+            if (-not $found.ContainsKey($pth)) { $found[$pth] = @{ Name = @(); Content = @() } }
+            # only when no distinctive name term matched already (avoid double counting)
+            if ($found[$pth].Name.Count -eq 0) { $found[$pth].Name += $term }
         }
     }
 
     foreach ($path in @($found.Keys)) {
-        $fi = $map[$path]
-        if (-not $fi) { continue }
+        $name = [IO.Path]::GetFileName($path)
         $e = $found[$path]
         $hasName = ($e.Name.Count -gt 0)
 
         if (-not $hasName) {
-            if ($fi.Name -match $trustedNameRegex) { continue }
-            $x = $fi.Extension.ToLowerInvariant()
+            if ($name -match $trustedNameRegex) { continue }
+            $x = [IO.Path]::GetExtension($path).ToLowerInvariant()
             if (($x -eq '.exe' -or $x -eq '.dll') -and (Test-Trusted -FilePath $path)) { continue }
         }
 
         $all = New-Object System.Collections.Generic.List[string]
         foreach ($h in @($e.Name) + @($e.Content)) { if ($h -and -not $all.Contains($h)) { $all.Add($h) } }
-        Add-Row -Source 'File' -Name $fi.Name -Location $path -Terms $all.ToArray() -Modified $fi.LastWriteTime -NameHit $hasName -Big ($fi.Length -gt 20MB)
+        $when = New-Object System.DateTime ([int64]$tickOf[$path])
+        Add-Row -Source 'File' -Name $name -Location $path -Terms $all.ToArray() -Modified $when -NameHit $hasName -Big ($sizeOf[$path] -gt 20MB)
     }
 
     $scanned += $n
@@ -654,7 +762,7 @@ for ($i = 0; $i -lt $total; $i += $chunkSize) {
     $etaS = 0
     if ($scanned -gt 0) { $etaS = $secs * ($total - $scanned) / $scanned }
     $eta  = '  ETA {0:mm\:ss}' -f [timespan]::FromSeconds($etaS)
-    Show-Hud 'SCAN' ("{0}/{1}  {2}" -f $scanned, $total, $part[$n - 1].Name) $pct $eta
+    Show-Hud 'SCAN' ("{0}/{1}  {2}" -f $scanned, $total, [IO.Path]::GetFileName($paths[$n - 1])) $pct $eta
 }
 
 # ---------------------------------------------------------------------------
@@ -664,7 +772,7 @@ Show-Hud 'PROCS' 'running processes'
 foreach ($p in Get-Process) {
     $hit = [SigCore]::ScanText("$($p.ProcessName) $($p.MainWindowTitle)")
     if ($hit.Count -gt 0) {
-        Add-Row -Source 'Process' -Name $p.ProcessName -Location ("PID $($p.Id) | $($p.MainWindowTitle)") -Terms $hit -Modified $p.StartTime -NameHit $true
+        Add-Row -Source 'Process' -Name $p.ProcessName -Location ("PID $($p.Id) | $($p.MainWindowTitle)") -Terms $hit -Modified $null -NameHit $true
     }
 }
 
@@ -673,22 +781,28 @@ foreach ($p in Get-Process) {
 # ---------------------------------------------------------------------------
 Show-Hud 'TRACES' 'prefetch + recent'
 $traceSources = @(
-    @{ Label = 'Prefetch'; Glob = (Join-Path $env:SystemRoot 'Prefetch\*.pf') },
-    @{ Label = 'Recent';   Glob = (Join-Path $env:APPDATA 'Microsoft\Windows\Recent\*.lnk') }
+    @{ Label = 'Prefetch'; Dir = (Join-Path $env:SystemRoot 'Prefetch');                    Pattern = '*.pf' },
+    @{ Label = 'Recent';   Dir = (Join-Path $env:APPDATA 'Microsoft\Windows\Recent');       Pattern = '*.lnk' }
 )
 foreach ($src in $traceSources) {
-    foreach ($item in Get-ChildItem -Path $src.Glob -Force) {
-        $hit = @([SigCore]::ScanText($item.Name))
-        $mm = $nameRegex.Match($item.Name)
-        if ($mm.Success) {
-            $term = '{0} (file name)' -f $mm.Groups[2].Value
-            $db[$term] = 3
-            $hit += $term
+    if (-not (Test-Path -LiteralPath $src.Dir)) { continue }
+    try {
+        foreach ($full in [IO.Directory]::EnumerateFiles($src.Dir, $src.Pattern)) {
+            $nm  = [IO.Path]::GetFileName($full)
+            $hit = @([SigCore]::ScanText($nm))
+            if ($hit.Count -eq 0) {
+                $mm = $nameRegex.Match($nm)
+                if ($mm.Success) {
+                    $term = '{0} (file name)' -f $mm.Groups[2].Value
+                    $db[$term] = 3
+                    $hit = @($term)
+                }
+            }
+            if ($hit.Count -gt 0) {
+                Add-Row -Source $src.Label -Name $nm -Location $full -Terms $hit -Modified ([IO.File]::GetLastWriteTime($full)) -NameHit $true
+            }
         }
-        if ($hit.Count -gt 0) {
-            Add-Row -Source $src.Label -Name $item.Name -Location $item.FullName -Terms $hit -Modified $item.LastWriteTime -NameHit $true
-        }
-    }
+    } catch { }
 }
 
 # ---------------------------------------------------------------------------
