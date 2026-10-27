@@ -55,7 +55,7 @@ Add-Terms 3 'LiquidBounce, meteordevelopment, meteor-client, MeteorClient, Meteo
     Inertia Client, NodusClient, CosmosClient, Cosmos Client, BozeClient, Boze Client, Nursultan, CelestialClient, Celestial Client, ExpensiveClient, Expensive Client, Wexside, Akrien, RemixClient,
     Remix Client, MoonClient, Moon Client, Huzuni, Lambda Client, lambda-client, gamesense.pub, GameSense Client, SeppukuClient, Seppuku Client, PyroClient, Pyro Client, Weepcraft, GhostClient, Ghost Client' -Client
 Add-Terms 3 'Xenos Injector, Extreme Injector, ExtremeInjector, XrayUltimate, Xray Ultimate, Xray_Ultimate, XRay Pack, Xray-Pack, XRayTexture, XRay Texture, XRayResourcePack'
-Add-Terms 2 'ClickGUI, ReachHack, TinyTask, HitSelect, DoubleHand, NoSlowdown, ElytraFly, GSAutoClicker, OPAutoClicker, SpeedAutoClicker, AutoTrap, HoleFiller, SelfFill, FastBreak, Baritone, CheatEngine, Cheat Engine,
+Add-Terms 2 'ReachHack, TinyTask, HitSelect, DoubleHand, NoSlowdown, ElytraFly, GSAutoClicker, OPAutoClicker, SpeedAutoClicker, AutoTrap, HoleFiller, SelfFill, FastBreak, Baritone, CheatEngine, Cheat Engine,
     XRay, X-Ray, XRayMod, Xray Mod, AdvancedXRay, Advanced XRay, OreESP, Ore ESP, FreeCam, Free Cam, Free-Cam, Free_Cam, FullBright, Full Bright, Full-Bright'
 Add-Terms 1 'Flight, Macro, Velocity, FastPlace, Hitbox, Bhop, WallHack, Injector, Criticals, Backtrack, AutoHotkey, Surround, AutoArmor, Nuker, Tracers, AutoSprint, NoClip, Reach, Blink'
 $db['xray-pack (transparent blocks)'] = 3
